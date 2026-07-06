@@ -1,0 +1,20 @@
+# Upstream projects (clone separately — see segagent/README.md)
+VoxTell/
+voxtell-web-plugin/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Node / frontend build
+node_modules/
+dist/
+
+# OS / editor
+.DS_Store
+.claude/
+
+# Models / large weights
+models/
+*.nii
+*.nii.gz

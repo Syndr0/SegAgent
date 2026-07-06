@@ -1,0 +1,8 @@
+# Extra dependencies for SegAgent (on top of voxtell-web-plugin's own deps).
+# Install these INSIDE the voxtell conda env on the server.
+transformers>=4.51.0     # Qwen2.5-VL + Qwen3-Embedding both need a recent transformers
+qwen-vl-utils>=0.0.8     # process_vision_info helper for Qwen2.5-VL
+accelerate>=0.30.0       # device_map="auto" placement
+pillow>=10.0.0           # slice -> PIL montage for the LLM
+# Optional, to fit Qwen2.5-VL-7B on a smaller GPU (see README, 4-bit section):
+# bitsandbytes>=0.43.0
