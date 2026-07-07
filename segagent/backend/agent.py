@@ -33,6 +33,9 @@ import torch
 QWEN_MODEL_ID = os.environ.get("SEGAGENT_LLM", "Qwen/Qwen2.5-VL-7B-Instruct")
 MAX_STEPS = int(os.environ.get("SEGAGENT_MAX_STEPS", "6"))
 N_MONTAGE_SLICES = int(os.environ.get("SEGAGENT_MONTAGE_SLICES", "6"))
+# How many mask-overlay slices to feed back to the LLM after each segmentation
+# (the `I_k` image observation in the design). Kept small to bound context growth.
+N_OVERLAY_SLICES = int(os.environ.get("SEGAGENT_OVERLAY_SLICES", "3"))
 MAX_NEW_TOKENS = int(os.environ.get("SEGAGENT_MAX_NEW_TOKENS", "512"))
 
 SYSTEM_PROMPT = """You are SegAgent, a careful radiology reasoning assistant that \
@@ -42,9 +45,12 @@ You cannot see the full 3D volume directly. You are shown a few representative 2
 slices for grounding, and you have ONE tool:
 
   segment(prompt): runs an expert 3D segmentation model (VoxTell) on the whole \
-volume. `prompt` is a short free-text anatomical description. It returns \
-quantitative statistics about the segmented region (voxel count, volume in mm^3, \
-whether anything was found, bounding box, mean image intensity inside the mask).
+volume. `prompt` is a short free-text anatomical description. It returns BOTH \
+(a) quantitative statistics about the segmented region (voxel count, volume in \
+mm^3, whether anything was found, bounding box, mean image intensity inside the \
+mask) AND (b) images showing the produced mask as a red overlay on the slices \
+where it is largest. Look at the overlay to judge whether the segmentation is \
+correct and to reason about the structure's location and shape.
 
 Use anatomical terms the model understands, e.g. "liver", "left kidney", "spleen", \
 "right lung upper lobe", "L4 vertebra", "prostate tumor".
@@ -113,41 +119,87 @@ class SegAgent:
         self.processor = AutoProcessor.from_pretrained(
             QWEN_MODEL_ID, min_pixels=256 * 28 * 28, max_pixels=1024 * 28 * 28)
 
-    # -------------------------------------------------------------- montage
+    # -------------------------------------------------------------- imaging
     @staticmethod
-    def _to_pil_slices(volume: np.ndarray, n: int):
+    def _as_3d(volume: np.ndarray) -> np.ndarray:
+        vol = np.asarray(volume, dtype=np.float32)
+        return vol[0] if vol.ndim == 4 else vol  # (C,X,Y,Z) -> (X,Y,Z)
+
+    @staticmethod
+    def _window_bounds(vol: np.ndarray):
+        """Modality-agnostic intensity window (1st/99th percentile)."""
+        lo, hi = np.percentile(vol, [1.0, 99.0])
+        if hi <= lo:
+            hi = float(lo) + 1.0
+        return float(lo), float(hi)
+
+    @staticmethod
+    def _slice_to_uint8(sl: np.ndarray, lo: float, hi: float) -> np.ndarray:
+        sl = np.clip((sl - lo) / (hi - lo), 0.0, 1.0)
+        return (sl * 255).astype(np.uint8)
+
+    def _to_pil_slices(self, volume: np.ndarray, n: int):
         """Turn a 3D volume into `n` evenly spaced, windowed axial PIL images."""
         from PIL import Image
 
-        vol = np.asarray(volume, dtype=np.float32)
-        if vol.ndim == 4:  # (C, X, Y, Z) -> drop channel
-            vol = vol[0]
-        # Modality-agnostic windowing on the whole volume.
-        lo, hi = np.percentile(vol, [1.0, 99.0])
-        if hi <= lo:
-            hi = lo + 1.0
+        vol = self._as_3d(volume)
+        lo, hi = self._window_bounds(vol)
         depth = vol.shape[-1]
         idxs = np.linspace(depth * 0.15, depth * 0.85, n).round().astype(int)
         idxs = np.clip(idxs, 0, depth - 1)
         images = []
         for z in idxs:
-            sl = vol[..., z]
-            sl = np.clip((sl - lo) / (hi - lo), 0.0, 1.0)
-            sl = (sl * 255).astype(np.uint8)
+            sl = self._slice_to_uint8(vol[..., z], lo, hi)
             # Orient so rows read top-to-bottom nicely; harmless for grounding.
             images.append(Image.fromarray(sl.T[::-1]).convert("RGB"))
         return images
 
+    def _overlay_slices(self, volume: np.ndarray, mask: np.ndarray, n: int):
+        """Render the mask (red, 50%) over the `n` slices with the most mask.
+
+        This is the `I_k` image observation from the design: the actual
+        segmentation matrix, handed back to the LLM visually so it can reason
+        about the structure's location, shape and extent — not just its stats.
+        """
+        from PIL import Image
+
+        vol = self._as_3d(volume)
+        m = np.asarray(mask) > 0
+        lo, hi = self._window_bounds(vol)
+
+        # Choose the axial slices where the mask has the largest cross-section.
+        areas = m.sum(axis=(0, 1))  # per-z voxel counts
+        zs = [int(z) for z in np.argsort(areas)[::-1] if areas[z] > 0][:n]
+        zs.sort()
+
+        red = np.array([255.0, 0.0, 0.0], dtype=np.float32)
+        images = []
+        for z in zs:
+            base = self._slice_to_uint8(vol[..., z], lo, hi).astype(np.float32)
+            rgb = np.stack([base, base, base], axis=-1)  # (X,Y,3) grayscale
+            msl = m[..., z]
+            rgb[msl] = 0.5 * rgb[msl] + 0.5 * red        # blend mask in red
+            rgb = rgb.astype(np.uint8)
+            # Same orientation transform as _to_pil_slices, applied to (X,Y,3).
+            rgb = np.transpose(rgb, (1, 0, 2))[::-1]
+            images.append(Image.fromarray(rgb))
+        return images
+
     # ---------------------------------------------------------------- tool
     def _segment(self, image_np: np.ndarray, props, prompt: str):
-        """Run VoxTell for one prompt; return (observation_text, mask_id or None)."""
+        """Run VoxTell for one prompt.
+
+        Returns ``(observation_text, mask_id or None, overlay_images)`` where
+        ``overlay_images`` is a list of PIL images (the mask matrix rendered on
+        the image) to feed back into the LLM for reasoning.
+        """
         seg = self.predictor.predict_single_image(image_np, [prompt])  # (1,X,Y,Z)
         mask = np.asarray(seg[0]).astype(np.uint8)
         voxels = int(mask.sum())
 
         if voxels == 0:
             return (f'segment("{prompt}") -> NOT FOUND: 0 voxels segmented. '
-                    f"The model did not localize this structure."), None
+                    f"The model did not localize this structure."), None, []
 
         # Physical volume if spacing is available.
         spacing = None
@@ -180,9 +232,15 @@ class SegAgent:
         except Exception:
             mask_id = None  # observation still useful even if writing failed
 
+        # Render the mask matrix back as images for the LLM to reason over.
+        try:
+            overlays = self._overlay_slices(image_np, mask, N_OVERLAY_SLICES)
+        except Exception:
+            overlays = []
+
         obs = (f'segment("{prompt}") -> FOUND. volume={vol_str}; '
                f"mean_intensity={mean_int:.1f}; bbox(voxels)={bbox}.")
-        return obs, mask_id
+        return obs, mask_id, overlays
 
     # --------------------------------------------------------------- parse
     @staticmethod
@@ -262,9 +320,9 @@ class SegAgent:
             # kind == "action": call the segmentation expert.
             yield {"type": "action", "step": step, "prompt": payload}
             try:
-                obs, mask_id = self._segment(image_np, props, payload)
+                obs, mask_id, overlays = self._segment(image_np, props, payload)
             except Exception as e:
-                obs, mask_id = f'segment("{payload}") -> ERROR: {e}', None
+                obs, mask_id, overlays = f'segment("{payload}") -> ERROR: {e}', None, []
 
             yield {"type": "observation", "step": step, "text": obs,
                    "prompt": payload}
@@ -272,7 +330,18 @@ class SegAgent:
                 yield {"type": "mask", "step": step, "mask_id": mask_id,
                        "prompt": payload}
 
-            messages.append({"role": "user", "content": f"OBSERVATION: {obs}"})
+            # Feed the observation back to the LLM: stats as text PLUS the mask
+            # rendered on the slices (the design's `I_k` image observation).
+            obs_content = [{"type": "text", "text": f"OBSERVATION: {obs}"}]
+            if overlays:
+                obs_content.append({
+                    "type": "text",
+                    "text": (f"Below are {len(overlays)} slice(s) with the "
+                             f"segmentation of \"{payload}\" shown as a red "
+                             f"overlay. Reason about its location and shape."),
+                })
+                obs_content += [{"type": "image", "image": im} for im in overlays]
+            messages.append({"role": "user", "content": obs_content})
 
         # Ran out of steps — force a wrap-up answer.
         messages.append({"role": "user", "content":
