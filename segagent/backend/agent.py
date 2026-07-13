@@ -78,10 +78,11 @@ from the scan, a clarifying question to the user.
 Identify the body region FIRST:
 - If the user names a treatment site or specific organs, use them directly.
 - If the user asks for "OARs" / "risk organs" but does NOT name a site, do not \
-guess blindly and never emit a placeholder. FIRST look at the slices and decide \
-which region this scan shows: brain, head and neck, thorax, breast, abdomen, \
-or pelvis. State the visual evidence in THOUGHT (e.g. "both lungs and ribs are \
-visible -> thorax"), then call lookup_oar("<that region>").
+guess blindly and never emit a placeholder. FIRST look at the slices — especially \
+the coronal and sagittal views, which show the whole head-to-pelvis extent — and \
+decide which region this scan shows: brain, head and neck, thorax, breast, \
+abdomen, or pelvis. State the visual evidence in THOUGHT (e.g. "both lungs and \
+ribs are visible -> thorax"), then call lookup_oar("<that region>").
 
 Typical OAR workflow: (1) infer the region from the slices if it was not given, \
 (2) lookup_oar(region), (3) ONE segment call with all returned organs \
@@ -184,6 +185,25 @@ class SegAgent:
             # Orient so rows read top-to-bottom nicely; harmless for grounding.
             images.append(Image.fromarray(sl.T[::-1]).convert("RGB"))
         return images
+
+    def _ortho_views(self, volume: np.ndarray):
+        """Return (coronal, sagittal) mid-plane PIL images.
+
+        Unlike axial slices, these two show the FULL superior->inferior extent
+        of the scan in a single image (like a scout / topogram), which is the
+        strongest cue for identifying the body region.
+        """
+        from PIL import Image
+
+        vol = self._as_3d(volume)                 # (X, Y, Z), Z ~ sup-inf
+        lo, hi = self._window_bounds(vol)
+        X, Y, Z = vol.shape
+        # Coronal: fix mid antero-posterior (Y); rows=Z (superior at top), cols=X.
+        cor = self._slice_to_uint8(vol[:, Y // 2, :], lo, hi).T[::-1]
+        # Sagittal: fix mid left-right (X); rows=Z (superior at top), cols=Y.
+        sag = self._slice_to_uint8(vol[X // 2, :, :], lo, hi).T[::-1]
+        return (Image.fromarray(cor).convert("RGB"),
+                Image.fromarray(sag).convert("RGB"))
 
     def _overlay_slices(self, volume: np.ndarray, mask: np.ndarray, n: int):
         """Render the mask (red, 50%) over the `n` slices with the most mask.
@@ -330,12 +350,29 @@ class SegAgent:
             yield {"type": "error", "text": f"Failed to initialize agent: {e}"}
             return
 
-        user_content = [{"type": "image", "image": im} for im in slices]
-        user_content.append({
+        # Coronal + sagittal views show the full superior->inferior extent in one
+        # image (like a scout), which is the strongest cue for the body region.
+        try:
+            coronal, sagittal = self._ortho_views(image_np)
+        except Exception:
+            coronal, sagittal = None, None
+
+        user_content = [{
             "type": "text",
-            "text": (f"These are {len(slices)} representative slices of one 3D "
-                     f"scan.\n\nQuestion: {question}"),
-        })
+            "text": (f"Grounding views of ONE 3D scan. First, {len(slices)} axial "
+                     f"slices from superior to inferior:"),
+        }]
+        user_content += [{"type": "image", "image": im} for im in slices]
+        if coronal is not None and sagittal is not None:
+            user_content.append({
+                "type": "text",
+                "text": ("A coronal and a sagittal view (both show the full "
+                         "head-to-pelvis extent, superior at the top) — use these "
+                         "to identify the body region:"),
+            })
+            user_content.append({"type": "image", "image": coronal})
+            user_content.append({"type": "image", "image": sagittal})
+        user_content.append({"type": "text", "text": f"\nQuestion: {question}"})
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
