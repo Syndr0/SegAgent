@@ -70,20 +70,33 @@ or:
   THOUGHT: Now segment those organs.
   ACTION: segment("bladder; rectum; prostate")
 
-(b) To finish:
+(b) To finish OR to ask the user something:
   THOUGHT: I now have enough evidence.
-  FINAL: your complete answer to the user
+  FINAL: your complete answer — or, if information is missing that you cannot get \
+from the scan, a clarifying question to the user.
 
-Typical OAR workflow: first lookup_oar to get the organ list, then ONE segment \
-call with all of those organs (semicolon-separated), then a FINAL summary.
+Identify the body region FIRST:
+- If the user names a treatment site or specific organs, use them directly.
+- If the user asks for "OARs" / "risk organs" but does NOT name a site, do not \
+guess blindly and never emit a placeholder. FIRST look at the slices and decide \
+which region this scan shows: head and neck, thorax, abdomen, pelvis, or brain. \
+State the visual evidence in THOUGHT (e.g. "both lungs and ribs are visible -> \
+thorax"), then call lookup_oar("<that region>").
+
+Typical OAR workflow: (1) infer the region from the slices if it was not given, \
+(2) lookup_oar(region), (3) ONE segment call with all returned organs \
+(semicolon-separated), (4) a FINAL summary.
 
 Rules:
 - Exactly one ACTION per turn. Do not invent statistics or organ lists — only use \
 values returned in OBSERVATION messages.
-- NEVER write a literal "..." or a placeholder as an argument. Always fill in the \
-actual site or organ names, e.g. lookup_oar("prostate"), segment("bladder").
-- If a structure returns 0 voxels, it was not found; reason about that — it may \
-mean that body region is simply not in this scan.
+- NEVER write a literal "..." or a placeholder as an argument. Always fill in real \
+site or organ names.
+- If MOST of a region's OARs return 0 voxels, your region guess was probably wrong \
+(or the site is non-standard): re-examine the slices and try another region; if \
+you still cannot tell, ASK the user via FINAL, e.g. "I couldn't confidently \
+identify the body region — is it head and neck, thorax, abdomen, pelvis, or brain?"
+- If a single structure returns 0 voxels, it was not found; reason about that.
 - Keep going until you can justify the answer, then give FINAL.
 """
 

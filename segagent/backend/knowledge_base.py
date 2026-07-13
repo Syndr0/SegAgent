@@ -101,8 +101,9 @@ class OARKnowledgeBase:
         if p is None:
             sites = ", ".join(pp["site"] for pp in self.protocols)
             return (f'lookup_oar("{query}") -> NO MATCH. Known protocols: {sites}. '
-                    f"Ask the user which site, or call segment() with explicit "
-                    f"organ names.")
+                    f"Look at the slices to infer the body region and retry "
+                    f"lookup_oar with one of those protocol names; if you cannot "
+                    f"tell from the image, ask the user via FINAL.")
         oars = p.get("oars", [])
         joined = "; ".join(oars)
         return (f'lookup_oar("{query}") -> matched "{p["site"]}" (via {how}). '
