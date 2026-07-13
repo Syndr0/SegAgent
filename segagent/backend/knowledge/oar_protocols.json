@@ -1,35 +1,41 @@
 {
-  "_comment": "Curated OAR (organs-at-risk) protocols for SegAgent. Edit freely. 'site' is the canonical name, 'aliases' help keyword matching, 'description' feeds semantic retrieval, 'oars' is the exact list handed to VoxTell. Use organ names VoxTell can segment; verify against your model before clinical use.",
+  "_comment": "Curated OAR (organs-at-risk) protocols for SegAgent. Edit freely. 'site' is the canonical name, 'aliases' help keyword matching (include diagnoses + Chinese), 'description' feeds semantic retrieval, 'oars' is the exact list handed to VoxTell. Lists follow common RT guidelines (RTOG / StructSeg / DAHANCA-style). IMPORTANT: names must be terms VoxTell can segment — verify against your checkpoint; fine substructures (lens, cochlea, LAD, brachial plexus, constrictor) may not be supported and will simply return 0 voxels, which the agent treats as 'not found'. The auto-region step emits one of: head and neck, thorax, abdomen, pelvis, brain — keep those keywords present as aliases.",
   "protocols": [
     {
+      "site": "Brain",
+      "aliases": ["brain", "cranial", "intracranial", "glioma", "glioblastoma", "meningioma", "brain metastasis", "brain metastases", "acoustic neuroma", "vestibular schwannoma", "pituitary adenoma", "SRS", "stereotactic radiosurgery", "脑", "颅内", "胶质瘤", "脑转移"],
+      "description": "Organs at risk for cranial / brain radiotherapy (glioma, meningioma, brain metastases, SRS, pituitary tumors).",
+      "oars": ["brain", "brainstem", "spinal cord", "optic chiasm", "left optic nerve", "right optic nerve", "left eye", "right eye", "left lens", "right lens", "left lacrimal gland", "right lacrimal gland", "pituitary gland", "left cochlea", "right cochlea", "left inner ear", "right inner ear", "left hippocampus", "right hippocampus", "left temporal lobe", "right temporal lobe", "skull"]
+    },
+    {
       "site": "Head and Neck",
-      "aliases": ["head and neck", "H&N", "HN", "nasopharynx", "nasopharyngeal", "oropharynx", "oropharyngeal", "larynx", "laryngeal", "头颈", "鼻咽"],
-      "description": "Organs at risk for head and neck radiotherapy (nasopharyngeal, oropharyngeal, laryngeal carcinoma).",
-      "oars": ["brainstem", "spinal cord", "left parotid gland", "right parotid gland", "left submandibular gland", "right submandibular gland", "mandible", "larynx", "oral cavity", "left optic nerve", "right optic nerve", "optic chiasm", "left eye", "right eye", "left cochlea", "right cochlea", "brain", "pituitary gland"]
+      "aliases": ["head and neck", "H&N", "HN", "nasopharynx", "nasopharyngeal", "nasopharyngeal carcinoma", "NPC", "oropharynx", "oropharyngeal", "hypopharynx", "hypopharyngeal", "larynx", "laryngeal", "oral cavity", "tongue", "tonsil", "salivary gland", "thyroid cancer", "头颈", "鼻咽", "鼻咽癌", "喉", "口咽", "甲状腺"],
+      "description": "Organs at risk for head and neck radiotherapy (nasopharyngeal, oropharyngeal, hypopharyngeal, laryngeal, oral cavity carcinoma).",
+      "oars": ["brainstem", "spinal cord", "brain", "left parotid gland", "right parotid gland", "left submandibular gland", "right submandibular gland", "larynx", "pharyngeal constrictor muscle", "oral cavity", "mandible", "left optic nerve", "right optic nerve", "optic chiasm", "left eye", "right eye", "left lens", "right lens", "left cochlea", "right cochlea", "left inner ear", "right inner ear", "left temporomandibular joint", "right temporomandibular joint", "thyroid gland", "esophagus", "left brachial plexus", "right brachial plexus", "lips", "pituitary gland"]
     },
     {
       "site": "Thorax",
-      "aliases": ["thorax", "thoracic", "chest", "lung", "lung cancer", "esophageal", "esophagus", "breast", "胸部", "肺"],
-      "description": "Organs at risk for thoracic radiotherapy (lung cancer, esophageal cancer).",
-      "oars": ["heart", "left lung", "right lung", "spinal cord", "esophagus", "trachea"]
+      "aliases": ["thorax", "thoracic", "chest", "lung", "lung cancer", "NSCLC", "SCLC", "non-small cell lung cancer", "mediastinum", "mediastinal", "esophageal", "esophagus", "esophageal cancer", "thymoma", "lung SBRT", "胸部", "肺", "肺癌", "纵隔", "食管", "食管癌"],
+      "description": "Organs at risk for thoracic radiotherapy (lung cancer, esophageal cancer, mediastinal tumors, thymoma).",
+      "oars": ["heart", "left lung", "right lung", "spinal cord", "esophagus", "trachea", "proximal bronchial tree", "aorta", "superior vena cava", "left brachial plexus", "right brachial plexus", "left humeral head", "right humeral head", "thyroid gland", "left lung upper lobe", "left lung lower lobe", "right lung upper lobe", "right lung middle lobe", "right lung lower lobe", "pulmonary artery"]
+    },
+    {
+      "site": "Breast",
+      "aliases": ["breast", "breast cancer", "left breast", "right breast", "chest wall", "mastectomy", "lumpectomy", "whole breast", "regional nodal irradiation", "乳腺", "乳房", "乳腺癌"],
+      "description": "Organs at risk for breast radiotherapy (whole breast, chest wall, regional nodal irradiation).",
+      "oars": ["heart", "left anterior descending coronary artery", "left lung", "right lung", "spinal cord", "esophagus", "contralateral breast", "left humeral head", "right humeral head", "thyroid gland", "left brachial plexus", "right brachial plexus", "trachea"]
     },
     {
       "site": "Upper Abdomen",
-      "aliases": ["upper abdomen", "abdomen", "abdominal", "liver", "liver SBRT", "pancreas", "pancreatic", "gastric", "stomach", "腹部", "肝"],
-      "description": "Organs at risk for upper abdominal radiotherapy (liver SBRT, pancreatic, gastric cancer).",
-      "oars": ["liver", "left kidney", "right kidney", "spleen", "stomach", "duodenum", "spinal cord", "small bowel"]
+      "aliases": ["upper abdomen", "abdomen", "abdominal", "liver", "liver SBRT", "hepatocellular carcinoma", "HCC", "pancreas", "pancreatic", "pancreatic cancer", "gastric", "stomach", "stomach cancer", "cholangiocarcinoma", "biliary", "adrenal", "kidney", "renal", "腹部", "肝", "肝癌", "胰腺", "胰腺癌", "胃", "肾"],
+      "description": "Organs at risk for upper abdominal radiotherapy (liver SBRT, pancreatic, gastric, biliary, renal, adrenal tumors).",
+      "oars": ["liver", "left kidney", "right kidney", "spleen", "stomach", "duodenum", "pancreas", "gallbladder", "spinal cord", "small bowel", "colon", "left adrenal gland", "right adrenal gland", "esophagus", "aorta", "inferior vena cava", "common bile duct"]
     },
     {
       "site": "Pelvis",
-      "aliases": ["pelvis", "pelvic", "prostate", "prostatic", "rectal", "rectum", "cervix", "cervical", "bladder", "盆腔", "前列腺"],
-      "description": "Organs at risk for pelvic radiotherapy (prostate, rectal, cervical cancer).",
-      "oars": ["bladder", "rectum", "left femoral head", "right femoral head", "sigmoid colon", "small bowel", "prostate"]
-    },
-    {
-      "site": "Brain",
-      "aliases": ["brain", "cranial", "intracranial", "glioma", "meningioma", "brain metastasis", "脑", "颅内"],
-      "description": "Organs at risk for cranial radiotherapy (glioma, meningioma, brain metastases).",
-      "oars": ["brainstem", "optic chiasm", "left optic nerve", "right optic nerve", "left eye", "right eye", "pituitary gland", "left cochlea", "right cochlea", "left hippocampus", "right hippocampus"]
+      "aliases": ["pelvis", "pelvic", "prostate", "prostatic", "prostate cancer", "rectal", "rectum", "rectal cancer", "cervix", "cervical", "cervical cancer", "endometrial", "uterine", "bladder cancer", "anal", "anal canal", "gynecologic", "盆腔", "前列腺", "前列腺癌", "直肠", "直肠癌", "宫颈", "膀胱"],
+      "description": "Organs at risk for pelvic radiotherapy (prostate, rectal, cervical, endometrial, bladder, anal cancer).",
+      "oars": ["bladder", "rectum", "left femoral head", "right femoral head", "sigmoid colon", "small bowel", "colon", "prostate", "seminal vesicles", "penile bulb", "anal canal", "urethra", "uterus", "cervix", "vagina", "left ovary", "right ovary", "cauda equina", "sacrum"]
     }
   ]
 }

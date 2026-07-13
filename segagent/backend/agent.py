@@ -79,9 +79,9 @@ Identify the body region FIRST:
 - If the user names a treatment site or specific organs, use them directly.
 - If the user asks for "OARs" / "risk organs" but does NOT name a site, do not \
 guess blindly and never emit a placeholder. FIRST look at the slices and decide \
-which region this scan shows: head and neck, thorax, abdomen, pelvis, or brain. \
-State the visual evidence in THOUGHT (e.g. "both lungs and ribs are visible -> \
-thorax"), then call lookup_oar("<that region>").
+which region this scan shows: brain, head and neck, thorax, breast, abdomen, \
+or pelvis. State the visual evidence in THOUGHT (e.g. "both lungs and ribs are \
+visible -> thorax"), then call lookup_oar("<that region>").
 
 Typical OAR workflow: (1) infer the region from the slices if it was not given, \
 (2) lookup_oar(region), (3) ONE segment call with all returned organs \
@@ -95,7 +95,8 @@ site or organ names.
 - If MOST of a region's OARs return 0 voxels, your region guess was probably wrong \
 (or the site is non-standard): re-examine the slices and try another region; if \
 you still cannot tell, ASK the user via FINAL, e.g. "I couldn't confidently \
-identify the body region — is it head and neck, thorax, abdomen, pelvis, or brain?"
+identify the body region — is it brain, head and neck, thorax, breast, abdomen, \
+or pelvis?"
 - If a single structure returns 0 voxels, it was not found; reason about that.
 - Keep going until you can justify the answer, then give FINAL.
 """
