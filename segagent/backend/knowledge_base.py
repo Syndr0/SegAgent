@@ -83,6 +83,10 @@ class OARKnowledgeBase:
     # -------------------------------------------------------------- public
     def lookup(self, query: str) -> Tuple[Optional[dict], Optional[str]]:
         """Return (protocol, how) where how is 'keyword' | 'semantic' | None."""
+        # Reject degenerate queries (empty, "...", punctuation only) so they can
+        # never fall through to a spurious semantic match.
+        if not self._norm(query):
+            return None, None
         p = self._keyword_match(query)
         if p is not None:
             return p, "keyword"
