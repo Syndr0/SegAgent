@@ -42,15 +42,21 @@ SYSTEM_PROMPT = """You are SegAgent, a careful radiology reasoning assistant tha
 analyzes a single 3D medical scan (CT / MRI / PET) to answer the user's question.
 
 You cannot see the full 3D volume directly. You are shown a few representative 2D \
-slices for grounding, and you have ONE tool:
+slices for grounding, and you have TWO tools:
+
+  lookup_oar(query): look up the standard organs-at-risk (OAR) list for a \
+radiotherapy site or clinical description in a curated knowledge base. Use it \
+whenever the user asks to contour/segment "OARs" / "risk organs", or names a \
+treatment site or diagnosis (e.g. "head and neck", "prostate plan", "鼻咽癌") \
+without spelling out every organ. It returns the exact organ names to delineate.
 
   segment(prompt): runs an expert 3D segmentation model (VoxTell) on the whole \
-volume. `prompt` is a short free-text anatomical description. It returns BOTH \
-(a) quantitative statistics about the segmented region (voxel count, volume in \
-mm^3, whether anything was found, bounding box, mean image intensity inside the \
-mask) AND (b) images showing the produced mask as a red overlay on the slices \
-where it is largest. Look at the overlay to judge whether the segmentation is \
-correct and to reason about the structure's location and shape.
+volume. `prompt` is one or more anatomical structures; to segment several at \
+once, separate them with semicolons, e.g. segment("liver; spleen; left kidney"). \
+It returns BOTH (a) quantitative statistics per structure (voxel count, volume in \
+mm^3, whether found, mean intensity) AND (b) images showing the produced mask(s) \
+as a red overlay on the slices where they are largest. Look at the overlay to \
+judge whether the segmentation is correct and to reason about location and shape.
 
 Use anatomical terms the model understands, e.g. "liver", "left kidney", "spleen", \
 "right lung upper lobe", "L4 vertebra", "prostate tumor".
@@ -58,18 +64,21 @@ Use anatomical terms the model understands, e.g. "liver", "left kidney", "spleen
 Work step by step. On EACH turn reply in EXACTLY one of these two forms:
 
   THOUGHT: <your reasoning for this step>
-  ACTION: segment("<free-text query>")
+  ACTION: <tool>(...)          where <tool> is lookup_oar or segment
 
 or, once you have enough evidence:
 
   THOUGHT: <your reasoning>
   FINAL: <your complete answer to the user>
 
+Typical OAR workflow: first lookup_oar to get the organ list, then ONE segment \
+call with all of those organs (semicolon-separated), then a FINAL summary.
+
 Rules:
-- Exactly one ACTION per turn. Do not invent statistics — only use values returned \
-in OBSERVATION messages.
+- Exactly one ACTION per turn. Do not invent statistics or organ lists — only use \
+values returned in OBSERVATION messages.
 - If a structure returns 0 voxels, it was not found; reason about that.
-- Keep segmenting until you can justify the answer, then give FINAL.
+- Keep going until you can justify the answer, then give FINAL.
 """
 
 
@@ -91,10 +100,12 @@ class SegAgent:
     """
 
     def __init__(self, predictor, write_seg: Callable, mask_dir: str,
-                 device: Optional[torch.device] = None):
+                 device: Optional[torch.device] = None, knowledge_base=None):
         self.predictor = predictor
         self.write_seg = write_seg
         self.mask_dir = mask_dir
+        # Optional OARKnowledgeBase for the lookup_oar tool (site -> organ list).
+        self.kb = knowledge_base
         os.makedirs(mask_dir, exist_ok=True)
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
@@ -187,74 +198,82 @@ class SegAgent:
 
     # ---------------------------------------------------------------- tool
     def _segment(self, image_np: np.ndarray, props, prompt: str):
-        """Run VoxTell for one prompt.
+        """Run VoxTell for one or more (';'-separated) structures in ONE pass.
 
-        Returns ``(observation_text, mask_id or None, overlay_images)`` where
-        ``overlay_images`` is a list of PIL images (the mask matrix rendered on
-        the image) to feed back into the LLM for reasoning.
+        Returns ``(observation_text, masks, overlay_images)`` where ``masks`` is
+        a list of ``{"mask_id", "prompt"}`` for each structure that was found,
+        and ``overlay_images`` are the produced masks rendered on the image for
+        the LLM to reason over.
         """
-        seg = self.predictor.predict_single_image(image_np, [prompt])  # (1,X,Y,Z)
-        mask = np.asarray(seg[0]).astype(np.uint8)
-        voxels = int(mask.sum())
+        structures = [s.strip() for s in re.split(r"[;\n]+", prompt) if s.strip()]
+        if not structures:
+            structures = [prompt.strip()]
 
-        if voxels == 0:
-            return (f'segment("{prompt}") -> NOT FOUND: 0 voxels segmented. '
-                    f"The model did not localize this structure."), None, []
+        # A single VoxTell inference handles all prompts at once (num_prompts,X,Y,Z).
+        seg = self.predictor.predict_single_image(image_np, structures)
 
-        # Physical volume if spacing is available.
+        img3d = self._as_3d(image_np)
         spacing = None
         try:
             spacing = props.get("spacing") if isinstance(props, dict) else None
         except Exception:
             spacing = None
-        if spacing is not None and len(spacing) >= 3:
-            vox_mm3 = float(abs(np.prod(list(spacing)[:3])))
-            vol_ml = voxels * vox_mm3 / 1000.0
-            vol_str = f"{voxels} voxels (~{vol_ml:.1f} mL)"
-        else:
-            vol_str = f"{voxels} voxels"
+        vox_mm3 = (float(abs(np.prod(list(spacing)[:3])))
+                   if spacing is not None and len(spacing) >= 3 else None)
 
-        coords = np.argwhere(mask > 0)
-        bb_min = coords.min(0)
-        bb_max = coords.max(0)
-        bbox = f"[{bb_min.tolist()} .. {bb_max.tolist()}]"
+        # Overlay budget: full detail for a single structure, one slice each when
+        # batching, capped so a large OAR set does not blow up the LLM context.
+        per_struct = N_OVERLAY_SLICES if len(structures) == 1 else 1
+        overlay_cap = max(N_OVERLAY_SLICES, 6)
 
-        img3d = np.asarray(image_np)
-        if img3d.ndim == 4:
-            img3d = img3d[0]
-        mean_int = float(img3d[mask > 0].mean())
+        lines, masks, overlays = [], [], []
+        for i, name in enumerate(structures):
+            mask = np.asarray(seg[i]).astype(np.uint8)
+            voxels = int(mask.sum())
+            if voxels == 0:
+                lines.append(f'- "{name}": NOT FOUND (0 voxels).')
+                continue
 
-        # Persist mask so the viewer can overlay it.
-        mask_id = uuid.uuid4().hex[:12]
-        out_path = os.path.join(self.mask_dir, f"{mask_id}.nii.gz")
-        try:
-            self.write_seg(mask, out_path, props)
-        except Exception:
-            mask_id = None  # observation still useful even if writing failed
+            if vox_mm3 is not None:
+                vol_str = f"{voxels} vox (~{voxels * vox_mm3 / 1000.0:.1f} mL)"
+            else:
+                vol_str = f"{voxels} vox"
+            mean_int = float(img3d[mask > 0].mean())
+            lines.append(f'- "{name}": volume={vol_str}, mean_intensity={mean_int:.1f}.')
 
-        # Render the mask matrix back as images for the LLM to reason over.
-        try:
-            overlays = self._overlay_slices(image_np, mask, N_OVERLAY_SLICES)
-        except Exception:
-            overlays = []
+            mask_id = uuid.uuid4().hex[:12]
+            out_path = os.path.join(self.mask_dir, f"{mask_id}.nii.gz")
+            try:
+                self.write_seg(mask, out_path, props)
+                masks.append({"mask_id": mask_id, "prompt": name})
+            except Exception:
+                pass  # stats still useful even if writing failed
 
-        obs = (f'segment("{prompt}") -> FOUND. volume={vol_str}; '
-               f"mean_intensity={mean_int:.1f}; bbox(voxels)={bbox}.")
-        return obs, mask_id, overlays
+            if len(overlays) < overlay_cap:
+                try:
+                    overlays += self._overlay_slices(image_np, mask, per_struct)
+                except Exception:
+                    pass
+
+        header = (f'segment("{prompt}") -> {len(masks)}/{len(structures)} '
+                  f"structure(s) found.")
+        obs = header + "\n" + "\n".join(lines)
+        return obs, masks, overlays[:overlay_cap]
 
     # --------------------------------------------------------------- parse
     @staticmethod
     def _parse(text: str):
-        """Return ('final', answer) | ('action', query) | ('final', text)."""
+        """Return ('final', answer) | ('action', (tool, arg)) | ('final', text)."""
         final = re.search(r"FINAL:\s*(.+)", text, re.S | re.I)
-        action = re.search(r"ACTION:\s*segment\s*\(\s*(.+?)\s*\)",
+        action = re.search(r"ACTION:\s*(segment|lookup_oar)\s*\(\s*(.+?)\s*\)",
                            text, re.S | re.I)
         # A FINAL that appears before any ACTION wins.
         if final and (not action or final.start() < action.start()):
             return "final", final.group(1).strip()
         if action:
-            q = action.group(1).strip().strip('"').strip("'").strip()
-            return "action", q
+            tool = action.group(1).lower()
+            arg = action.group(2).strip().strip('"').strip("'").strip()
+            return "action", (tool, arg)
         # No protocol match: treat the whole thing as the answer.
         return "final", text.strip()
 
@@ -317,28 +336,42 @@ class SegAgent:
                 yield {"type": "answer", "text": payload}
                 return
 
-            # kind == "action": call the segmentation expert.
-            yield {"type": "action", "step": step, "prompt": payload}
+            tool, arg = payload
+
+            # Knowledge-base lookup: return the curated OAR list as an observation.
+            if tool == "lookup_oar":
+                yield {"type": "action", "step": step, "tool": "lookup_oar",
+                       "prompt": arg}
+                if self.kb is not None:
+                    obs = self.kb.format_observation(arg)
+                else:
+                    obs = (f'lookup_oar("{arg}") -> knowledge base unavailable. '
+                           f"Call segment() with explicit organ names.")
+                yield {"type": "observation", "step": step, "text": obs,
+                       "prompt": arg}
+                messages.append({"role": "user", "content": f"OBSERVATION: {obs}"})
+                continue
+
+            # Segmentation expert (single structure or ';'-separated batch).
+            yield {"type": "action", "step": step, "tool": "segment", "prompt": arg}
             try:
-                obs, mask_id, overlays = self._segment(image_np, props, payload)
+                obs, masks, overlays = self._segment(image_np, props, arg)
             except Exception as e:
-                obs, mask_id, overlays = f'segment("{payload}") -> ERROR: {e}', None, []
+                obs, masks, overlays = f'segment("{arg}") -> ERROR: {e}', [], []
 
-            yield {"type": "observation", "step": step, "text": obs,
-                   "prompt": payload}
-            if mask_id:
-                yield {"type": "mask", "step": step, "mask_id": mask_id,
-                       "prompt": payload}
+            yield {"type": "observation", "step": step, "text": obs, "prompt": arg}
+            for m in masks:
+                yield {"type": "mask", "step": step, "mask_id": m["mask_id"],
+                       "prompt": m["prompt"]}
 
-            # Feed the observation back to the LLM: stats as text PLUS the mask
-            # rendered on the slices (the design's `I_k` image observation).
+            # Feed stats + the rendered mask(s) back to the LLM (design's `I_k`).
             obs_content = [{"type": "text", "text": f"OBSERVATION: {obs}"}]
             if overlays:
                 obs_content.append({
                     "type": "text",
                     "text": (f"Below are {len(overlays)} slice(s) with the "
-                             f"segmentation of \"{payload}\" shown as a red "
-                             f"overlay. Reason about its location and shape."),
+                             f"segmentation shown as a red overlay. Check the "
+                             f"location and shape."),
                 })
                 obs_content += [{"type": "image", "image": im} for im in overlays]
             messages.append({"role": "user", "content": obs_content})

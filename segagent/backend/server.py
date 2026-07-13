@@ -24,6 +24,7 @@ from rt_utils import RTStructBuilder
 
 from voxtell.inference.predictor import VoxTellPredictor
 from agent import SegAgent
+from knowledge_base import OARKnowledgeBase
 from dicom_sessions import (
     create_session,
     get_session_dicom_dir,
@@ -64,6 +65,20 @@ except Exception as e:
 # SegAgent (Qwen2.5-VL planner + VoxTell expert). The LLM is loaded lazily on
 # the first /chat request so the server still boots quickly.
 MASK_DIR = os.path.join(tempfile.gettempdir(), "segagent_masks")
+
+# OAR knowledge base for the lookup_oar tool. Reuse VoxTell's already-loaded
+# Qwen3-Embedding-4B for semantic retrieval (no second embedding model).
+KB_PATH = os.path.join(BASE_DIR, "knowledge", "oar_protocols.json")
+kb = None
+if predictor is not None:
+    def _embed(texts):
+        return predictor.embed_text_prompts(texts)[0].float().cpu().numpy()
+    try:
+        kb = OARKnowledgeBase(KB_PATH, embed_fn=_embed)
+        print(f"Loaded OAR knowledge base ({len(kb.protocols)} protocols).")
+    except Exception as e:
+        print(f"Warning: could not load OAR knowledge base: {e}")
+
 agent = None
 if predictor is not None:
     agent = SegAgent(
@@ -71,6 +86,7 @@ if predictor is not None:
         write_seg=NibabelIOWithReorient().write_seg,
         mask_dir=MASK_DIR,
         device=DEVICE,
+        knowledge_base=kb,
     )
 
 

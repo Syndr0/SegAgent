@@ -9,6 +9,7 @@ export interface AgentStep {
   step: number;
   text?: string;
   prompt?: string;
+  tool?: string; // for 'action': "segment" | "lookup_oar"
 }
 
 interface ChatTurn {
@@ -76,7 +77,7 @@ export default function ChatPanel({ image, onMask }: ChatPanelProps) {
               patch(t => ({ ...t, steps: [...t.steps, { kind: 'thinking', step: ev.step, text: ev.text }] }));
               break;
             case 'action':
-              patch(t => ({ ...t, steps: [...t.steps, { kind: 'action', step: ev.step, prompt: ev.prompt }] }));
+              patch(t => ({ ...t, steps: [...t.steps, { kind: 'action', step: ev.step, prompt: ev.prompt, tool: ev.tool }] }));
               break;
             case 'observation':
               patch(t => ({ ...t, steps: [...t.steps, { kind: 'observation', step: ev.step, text: ev.text, prompt: ev.prompt }] }));
@@ -218,7 +219,7 @@ function ChainOfThought({ steps, running }: { steps: AgentStep[]; running: boole
               return (
                 <div key={i} className="flex items-center gap-2 text-xs text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-2.5 py-1.5">
                   <Wrench className="w-3.5 h-3.5 flex-shrink-0" />
-                  <span className="font-mono">segment("{s.prompt}")</span>
+                  <span className="font-mono">{s.tool ?? 'segment'}("{s.prompt}")</span>
                 </div>
               );
             }

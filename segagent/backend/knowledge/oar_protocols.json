@@ -1,0 +1,35 @@
+{
+  "_comment": "Curated OAR (organs-at-risk) protocols for SegAgent. Edit freely. 'site' is the canonical name, 'aliases' help keyword matching, 'description' feeds semantic retrieval, 'oars' is the exact list handed to VoxTell. Use organ names VoxTell can segment; verify against your model before clinical use.",
+  "protocols": [
+    {
+      "site": "Head and Neck",
+      "aliases": ["head and neck", "H&N", "HN", "nasopharynx", "nasopharyngeal", "oropharynx", "oropharyngeal", "larynx", "laryngeal", "头颈", "鼻咽"],
+      "description": "Organs at risk for head and neck radiotherapy (nasopharyngeal, oropharyngeal, laryngeal carcinoma).",
+      "oars": ["brainstem", "spinal cord", "left parotid gland", "right parotid gland", "left submandibular gland", "right submandibular gland", "mandible", "larynx", "oral cavity", "left optic nerve", "right optic nerve", "optic chiasm", "left eye", "right eye", "left cochlea", "right cochlea", "brain", "pituitary gland"]
+    },
+    {
+      "site": "Thorax",
+      "aliases": ["thorax", "thoracic", "chest", "lung", "lung cancer", "esophageal", "esophagus", "breast", "胸部", "肺"],
+      "description": "Organs at risk for thoracic radiotherapy (lung cancer, esophageal cancer).",
+      "oars": ["heart", "left lung", "right lung", "spinal cord", "esophagus", "trachea"]
+    },
+    {
+      "site": "Upper Abdomen",
+      "aliases": ["upper abdomen", "abdomen", "abdominal", "liver", "liver SBRT", "pancreas", "pancreatic", "gastric", "stomach", "腹部", "肝"],
+      "description": "Organs at risk for upper abdominal radiotherapy (liver SBRT, pancreatic, gastric cancer).",
+      "oars": ["liver", "left kidney", "right kidney", "spleen", "stomach", "duodenum", "spinal cord", "small bowel"]
+    },
+    {
+      "site": "Pelvis",
+      "aliases": ["pelvis", "pelvic", "prostate", "prostatic", "rectal", "rectum", "cervix", "cervical", "bladder", "盆腔", "前列腺"],
+      "description": "Organs at risk for pelvic radiotherapy (prostate, rectal, cervical cancer).",
+      "oars": ["bladder", "rectum", "left femoral head", "right femoral head", "sigmoid colon", "small bowel", "prostate"]
+    },
+    {
+      "site": "Brain",
+      "aliases": ["brain", "cranial", "intracranial", "glioma", "meningioma", "brain metastasis", "脑", "颅内"],
+      "description": "Organs at risk for cranial radiotherapy (glioma, meningioma, brain metastases).",
+      "oars": ["brainstem", "optic chiasm", "left optic nerve", "right optic nerve", "left eye", "right eye", "pituitary gland", "left cochlea", "right cochlea", "left hippocampus", "right hippocampus"]
+    }
+  ]
+}
