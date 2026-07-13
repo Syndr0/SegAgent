@@ -61,15 +61,18 @@ judge whether the segmentation is correct and to reason about location and shape
 Use anatomical terms the model understands, e.g. "liver", "left kidney", "spleen", \
 "right lung upper lobe", "L4 vertebra", "prostate tumor".
 
-Work step by step. On EACH turn reply in EXACTLY one of these two forms:
+Work step by step. On EACH turn reply in EXACTLY one of these two forms.
 
-  THOUGHT: <your reasoning for this step>
-  ACTION: <tool>(...)          where <tool> is lookup_oar or segment
+(a) To call a tool, write ACTION with a REAL argument, for example:
+  THOUGHT: I should look up the OARs for this treatment site.
+  ACTION: lookup_oar("head and neck")
+or:
+  THOUGHT: Now segment those organs.
+  ACTION: segment("bladder; rectum; prostate")
 
-or, once you have enough evidence:
-
-  THOUGHT: <your reasoning>
-  FINAL: <your complete answer to the user>
+(b) To finish:
+  THOUGHT: I now have enough evidence.
+  FINAL: your complete answer to the user
 
 Typical OAR workflow: first lookup_oar to get the organ list, then ONE segment \
 call with all of those organs (semicolon-separated), then a FINAL summary.
@@ -77,7 +80,10 @@ call with all of those organs (semicolon-separated), then a FINAL summary.
 Rules:
 - Exactly one ACTION per turn. Do not invent statistics or organ lists — only use \
 values returned in OBSERVATION messages.
-- If a structure returns 0 voxels, it was not found; reason about that.
+- NEVER write a literal "..." or a placeholder as an argument. Always fill in the \
+actual site or organ names, e.g. lookup_oar("prostate"), segment("bladder").
+- If a structure returns 0 voxels, it was not found; reason about that — it may \
+mean that body region is simply not in this scan.
 - Keep going until you can justify the answer, then give FINAL.
 """
 
@@ -337,6 +343,18 @@ class SegAgent:
                 return
 
             tool, arg = payload
+
+            # Guard against placeholder / empty arguments (e.g. the model echoing
+            # "..."). Send it back for a real one instead of running a tool on junk.
+            if not re.search(r"[A-Za-z0-9一-鿿]", arg):
+                yield {"type": "action", "step": step, "tool": tool, "prompt": arg}
+                obs = (f'{tool}("{arg}") -> INVALID: no real argument given. '
+                       f'Provide an actual name, e.g. lookup_oar("prostate") or '
+                       f'segment("bladder").')
+                yield {"type": "observation", "step": step, "text": obs,
+                       "prompt": arg}
+                messages.append({"role": "user", "content": f"OBSERVATION: {obs}"})
+                continue
 
             # Knowledge-base lookup: return the curated OAR list as an observation.
             if tool == "lookup_oar":
