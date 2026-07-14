@@ -26,6 +26,11 @@ from typing import Callable, Iterator, List, Optional
 import numpy as np
 import torch
 
+import qc_checks
+import qc_experts
+import qc_metrics
+from knowledge_base import _norm as _kbnorm
+
 # Lazy heavy imports (transformers / qwen_vl_utils / PIL) happen inside
 # _ensure_llm so the FastAPI process still boots even if the LLM weights are
 # not present yet.
@@ -103,6 +108,32 @@ or pelvis?"
 """
 
 
+QC_SYSTEM_PROMPT = """You are SegAgent-QC, a radiotherapy contour \
+quality-control assistant. You review an EXISTING structure set (organs already \
+delineated by someone) and report problems — you do not draw anything.
+
+You are given: (1) grounding views of the scan, (2) the region and which guideline \
+OARs appear to be MISSING, and (3) automated per-organ findings — geometry checks \
+(volume vs normal range, connected components, left/right laterality, holes) and \
+agreement with an independent expert segmentation model (Dice / surface distance).
+
+Write a concise, clinically useful QC report:
+- An overall verdict (how many organs look fine / need review / look wrong).
+- Missing structures (少勾) that should probably be added for this region, each with \
+a one-line rationale.
+- For each flagged organ, the most likely problem in plain language (under- or \
+over-contour, left/right swap, fragmentation/stray voxels, interior holes, or \
+disagreement with the expert model) and what to check.
+
+Rules:
+- Use ONLY the provided findings and metrics — do not invent numbers.
+- The expert model is a REFERENCE, not ground truth: phrase disagreements as \
+"differs from the expert model", and do not fail a contour on expert disagreement \
+alone if geometry looks fine.
+- Reply as:  FINAL: <your report>
+"""
+
+
 class SegAgent:
     """Drives Qwen2.5-VL over VoxTell in a ReAct loop.
 
@@ -121,12 +152,16 @@ class SegAgent:
     """
 
     def __init__(self, predictor, write_seg: Callable, mask_dir: str,
-                 device: Optional[torch.device] = None, knowledge_base=None):
+                 device: Optional[torch.device] = None, knowledge_base=None,
+                 organ_reference=None, guidelines=None):
         self.predictor = predictor
         self.write_seg = write_seg
         self.mask_dir = mask_dir
         # Optional OARKnowledgeBase for the lookup_oar tool (site -> organ list).
         self.kb = knowledge_base
+        # QC knowledge: OrganReferenceKB (ranges/laterality) + optional GuidelineKB.
+        self.organ_ref = organ_reference
+        self.guidelines = guidelines
         os.makedirs(mask_dir, exist_ok=True)
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
@@ -457,3 +492,156 @@ class SegAgent:
             yield {"type": "answer", "text": payload}
         except Exception as e:
             yield {"type": "error", "text": f"LLM generation failed: {e}"}
+
+    # =============================================================== QC =====
+    def _save_mask(self, mask: np.ndarray, props) -> Optional[str]:
+        """Persist a mask as .nii.gz and return its id (for the viewer)."""
+        mask_id = uuid.uuid4().hex[:12]
+        out_path = os.path.join(self.mask_dir, f"{mask_id}.nii.gz")
+        try:
+            self.write_seg(np.asarray(mask).astype(np.uint8), out_path, props)
+            return mask_id
+        except Exception:
+            return None
+
+    def _completeness(self, organs: List[str]):
+        """Pick the best-matching protocol and diff present vs expected OARs.
+
+        Returns (region, expected, missing, unexpected).
+        """
+        if self.kb is None or not organs:
+            return None, [], [], list(organs)
+        present = {_kbnorm(o) for o in organs}
+        best = None  # (overlap, protocol, oar_norm_set)
+        for p in self.kb.protocols:
+            oar_norm = {_kbnorm(x) for x in p.get("oars", [])}
+            overlap = len(present & oar_norm)
+            if best is None or overlap > best[0]:
+                best = (overlap, p, oar_norm)
+        if best is None or best[0] == 0:
+            return None, [], [], list(organs)
+        _, proto, oar_norm = best
+        expected = list(proto.get("oars", []))
+        missing = [x for x in expected if _kbnorm(x) not in present]
+        unexpected = [o for o in organs if _kbnorm(o) not in oar_norm]
+        return proto["site"], expected, missing, unexpected
+
+    def run_qc(self, ss, question: str = "") -> Iterator[dict]:
+        """Audit an existing structure set. Yields QC events + a final report.
+
+        Deterministic completeness + per-organ geometry checks + a batched expert
+        cross-check produce the structured report; the LLM then writes a narrative.
+        """
+        organs = list(ss.structures.keys())
+        yield {"type": "qc_start", "structures": organs, "warnings": ss.warnings}
+
+        # 1) Completeness (missing / unexpected) from the OAR knowledge base.
+        region, expected, missing, unexpected = self._completeness(organs)
+        yield {"type": "qc_completeness", "region": region,
+               "missing": missing, "unexpected": unexpected}
+
+        # 2) Expert cross-check (one batched VoxTell pass over all present organs).
+        xres = {}
+        if self.predictor is not None and organs:
+            expert = qc_experts.make_expert("voxtell", self.predictor)
+            try:
+                xres = qc_experts.cross_check(ss, expert, with_surface=True)
+            except Exception as e:
+                yield {"type": "error", "text": f"expert cross-check failed: {e}"}
+
+        # 3) Per-organ deterministic checks; assemble rows + overlay flagged organs.
+        rows = []
+        for organ in organs:
+            info = ss.structures[organ]
+            ref = self.organ_ref.get(organ) if self.organ_ref is not None else None
+            ctx = qc_checks.CheckContext(
+                organ=organ, mask=info["mask"], spacing=ss.spacing,
+                lr_axis=ss.lr_axis, left_is_high_index=ss.left_is_high_index,
+                reference=ref, image=ss.image)
+            findings = qc_checks.run_checks(ctx)
+            xr = xres.get(organ, {})
+            if xr.get("finding"):
+                findings.append(xr["finding"])
+            status = qc_checks.overall_status(findings)
+            vol = qc_metrics.volume_ml(info["mask"], ss.spacing)
+            dice = (xr.get("metrics") or {}).get("dice")
+            row = {
+                "organ": organ, "status": status,
+                "volume_ml": round(vol, 1) if vol is not None else None,
+                "dice": dice,
+                "findings": [{"check": f["check"], "severity": f["severity"],
+                              "message": f["message"]} for f in findings],
+            }
+            rows.append(row)
+            yield {"type": "qc_organ", **row}
+
+            # Overlay the expert mask for flagged organs so the reviewer can compare.
+            exp = xr.get("expert_mask")
+            if status != "ok" and exp is not None and int(np.asarray(exp).sum()) > 0:
+                mid = self._save_mask(exp, ss.props)
+                if mid:
+                    yield {"type": "mask", "mask_id": mid,
+                           "prompt": f"{organ} (expert)"}
+
+        summary = {s: sum(r["status"] == s for r in rows)
+                   for s in ("ok", "warn", "error")}
+        report = {"type": "qc_report", "region": region, "present": organs,
+                  "missing": missing, "unexpected": unexpected,
+                  "organs": rows, "summary": summary}
+        yield report
+
+        # 4) LLM narrative synthesis over the findings.
+        try:
+            yield from self._qc_synthesis(ss, report, question)
+        except Exception as e:
+            yield {"type": "error", "text": f"QC synthesis failed: {e}"}
+
+    def _qc_synthesis(self, ss, report: dict, question: str) -> Iterator[dict]:
+        self._ensure_llm()
+        axial = self._to_pil_slices(ss.image, N_MONTAGE_SLICES)
+        try:
+            coronal, sagittal = self._ortho_views(ss.image)
+        except Exception:
+            coronal, sagittal = None, None
+
+        lines = [f"Region: {report['region']}"]
+        if report["missing"]:
+            lines.append("MISSING OARs (少勾): " + ", ".join(report["missing"]))
+        if report["unexpected"]:
+            lines.append("Present but not in the expected set: "
+                         + ", ".join(report["unexpected"]))
+        lines.append("Per-organ findings:")
+        for r in report["organs"]:
+            fl = "; ".join(f["message"] for f in r["findings"]) or "no issues"
+            lines.append(f'- {r["organ"]} [{r["status"]}] '
+                         f'vol={r["volume_ml"]}mL dice={r["dice"]}: {fl}')
+
+        # Optional guideline RAG for the flagged / missing organs.
+        if self.guidelines is not None:
+            flagged = [r["organ"] for r in report["organs"]
+                       if r["status"] != "ok"] + report["missing"]
+            query = "; ".join(flagged) or (report["region"] or "")
+            try:
+                passages = self.guidelines.retrieve(query, k=3) if query else []
+            except Exception:
+                passages = []
+            if passages:
+                lines.append("Relevant guideline passages:")
+                lines += [f"  * {p}" for p in passages]
+
+        content = [{"type": "text",
+                    "text": "Grounding views of the scan under QC:"}]
+        content += [{"type": "image", "image": im} for im in axial]
+        if coronal is not None and sagittal is not None:
+            content += [{"type": "image", "image": coronal},
+                        {"type": "image", "image": sagittal}]
+        ask = f"\nUser question: {question}" if question else ""
+        content.append({"type": "text",
+                        "text": "Automated QC findings:\n" + "\n".join(lines)
+                                + ask + "\n\nWrite the QC report."})
+        messages = [{"role": "system", "content": QC_SYSTEM_PROMPT},
+                    {"role": "user", "content": content}]
+        reply = self._generate(messages)
+        _, payload = self._parse(reply)
+        yield {"type": "thinking", "text": self._thought(reply)}
+        yield {"type": "answer", "text": payload}
