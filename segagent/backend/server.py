@@ -24,7 +24,8 @@ from rt_utils import RTStructBuilder
 
 from voxtell.inference.predictor import VoxTellPredictor
 from agent import SegAgent
-from knowledge_base import OARKnowledgeBase
+from knowledge_base import load_knowledge
+from qc_ingest import load_structure_set
 from dicom_sessions import (
     create_session,
     get_session_dicom_dir,
@@ -66,18 +67,33 @@ except Exception as e:
 # the first /chat request so the server still boots quickly.
 MASK_DIR = os.path.join(tempfile.gettempdir(), "segagent_masks")
 
-# OAR knowledge base for the lookup_oar tool. Reuse VoxTell's already-loaded
-# Qwen3-Embedding-4B for semantic retrieval (no second embedding model).
-KB_PATH = os.path.join(BASE_DIR, "knowledge", "oar_protocols.json")
-kb = None
+# Knowledge bases (auto-discovered from knowledge/*.json). Reuse VoxTell's
+# already-loaded Qwen3-Embedding-4B for semantic retrieval (no second model).
+KB_DIR = os.path.join(BASE_DIR, "knowledge")
+kb = organ_ref = guidelines = None
 if predictor is not None:
     def _embed(texts):
         return predictor.embed_text_prompts(texts)[0].float().cpu().numpy()
     try:
-        kb = OARKnowledgeBase(KB_PATH, embed_fn=_embed)
-        print(f"Loaded OAR knowledge base ({len(kb.protocols)} protocols).")
+        _kbs = load_knowledge(KB_DIR, embed_fn=_embed)
+        kb = _kbs.get("oar_protocols")
+        organ_ref = _kbs.get("organ_reference")
+        print(f"Loaded knowledge: "
+              f"{len(kb.protocols) if kb else 0} OAR protocols, "
+              f"{len(organ_ref.organs) if organ_ref else 0} organ references.")
     except Exception as e:
-        print(f"Warning: could not load OAR knowledge base: {e}")
+        print(f"Warning: could not load knowledge bases: {e}")
+    # Optional guideline RAG (loaded only if knowledge/guidelines/ has documents).
+    try:
+        from guideline_kb import GuidelineKB
+        guidelines = GuidelineKB(os.path.join(KB_DIR, "guidelines"), embed_fn=_embed)
+        if not guidelines.chunks:
+            guidelines = None
+        else:
+            print(f"Loaded guideline RAG ({len(guidelines.chunks)} chunks).")
+    except Exception as e:
+        print(f"Guideline RAG not loaded: {e}")
+        guidelines = None
 
 agent = None
 if predictor is not None:
@@ -87,6 +103,8 @@ if predictor is not None:
         mask_dir=MASK_DIR,
         device=DEVICE,
         knowledge_base=kb,
+        organ_reference=organ_ref,
+        guidelines=guidelines,
     )
 
 
@@ -413,6 +431,59 @@ async def chat(
             reader_writer = NibabelIOWithReorient()
             img, props = reader_writer.read_images([input_path])
             for event in agent.run(img, props, question):
+                yield json.dumps(event) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "text": str(e)}) + "\n"
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@app.post("/qc")
+async def qc(
+    archive: Annotated[UploadFile, File()],
+    question: Annotated[str, Form()] = "",
+):
+    """Audit an existing contour structure set (zipped folder) and stream QC events.
+
+    The zip must contain one grayscale scan (image.nii[.gz]) plus one binary mask
+    per structure (e.g. left_eye.nii). Streamed NDJSON event types:
+      qc_start        -> {structures, warnings}
+      qc_completeness -> {region, missing, unexpected}
+      qc_organ        -> {organ, status, volume_ml, dice, findings}
+      mask            -> {mask_id, prompt}   an expert mask to overlay
+      qc_report       -> full structured report
+      thinking/answer -> the LLM narrative
+      error           -> {text}
+    """
+    if agent is None:
+        raise HTTPException(status_code=500, detail="Agent not available (model not loaded).")
+    if not archive.filename or not archive.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400,
+                            detail="Please upload a .zip of the structure-set folder.")
+
+    tmp_dir = tempfile.mkdtemp(prefix="segagent_qc_")
+    zip_path = os.path.join(tmp_dir, archive.filename)
+    with open(zip_path, "wb") as buffer:
+        shutil.copyfileobj(archive.file, buffer)
+
+    extract_dir = os.path.join(tmp_dir, "extracted")
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+    except zipfile.BadZipFile:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="Invalid zip file.")
+
+    def event_stream():
+        try:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            reader_writer = NibabelIOWithReorient()
+            ss = load_structure_set(extract_dir, reader_writer)
+            for event in agent.run_qc(ss, question):
                 yield json.dumps(event) + "\n"
         except Exception as e:
             yield json.dumps({"type": "error", "text": str(e)}) + "\n"

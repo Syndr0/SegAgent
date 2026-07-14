@@ -2,7 +2,8 @@
 import { useState, useRef, useEffect, type ChangeEvent } from 'react';
 import Viewer, { type ViewerRef, SLICE_TYPE } from './components/Viewer';
 import ChatPanel from './components/ChatPanel';
-import { Upload, Play, Download, Brain, Loader2, Layers, Eye, EyeOff, Trash2, Pencil, Save, X, Undo2, Eraser, PaintBucket, ChevronUp, PanelLeftClose, PanelLeftOpen, MessageSquare } from 'lucide-react';
+import QcPanel from './components/QcPanel';
+import { Upload, Play, Download, Brain, Loader2, Layers, Eye, EyeOff, Trash2, Pencil, Save, X, Undo2, Eraser, PaintBucket, ChevronUp, PanelLeftClose, PanelLeftOpen, MessageSquare, ShieldCheck } from 'lucide-react';
 
 interface Segmentation {
   id: string;
@@ -51,6 +52,8 @@ function App() {
 
   // SegAgent chat panel visibility
   const [isChatOpen, setIsChatOpen] = useState(true);
+  // Right panel content: SegAgent chat vs contour QC.
+  const [panelMode, setPanelMode] = useState<'chat' | 'qc'>('chat');
 
   // DICOM state
   const [inputFormat, setInputFormat] = useState<'nifti' | 'dicom'>('nifti');
@@ -634,17 +637,31 @@ function App() {
           {isSidebarOpen ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
         </button>
 
-        {/* Chat Toggle */}
-        <button
-          onClick={() => setIsChatOpen(prev => !prev)}
-          className={`absolute top-4 right-4 z-20 p-2 backdrop-blur-sm border rounded-lg transition-all duration-200 shadow-md
-                     ${isChatOpen
-                       ? 'bg-indigo-600/80 border-indigo-500/60 text-white hover:bg-indigo-500/80'
-                       : 'bg-slate-800/80 border-slate-700/60 text-slate-400 hover:text-white hover:bg-slate-700/80'}`}
-          title={isChatOpen ? 'Hide SegAgent chat' : 'Show SegAgent chat'}
-        >
-          <MessageSquare className="w-4 h-4" />
-        </button>
+        {/* Panel Toggle (Chat / QC) */}
+        <div className="absolute top-4 right-4 z-20 flex gap-1.5">
+          {([
+            { mode: 'chat' as const, icon: MessageSquare, title: 'SegAgent chat' },
+            { mode: 'qc' as const, icon: ShieldCheck, title: 'Contour QC' },
+          ]).map(({ mode, icon: Icon, title }) => {
+            const active = isChatOpen && panelMode === mode;
+            return (
+              <button
+                key={mode}
+                onClick={() => {
+                  if (isChatOpen && panelMode === mode) setIsChatOpen(false);
+                  else { setPanelMode(mode); setIsChatOpen(true); }
+                }}
+                className={`p-2 backdrop-blur-sm border rounded-lg transition-all duration-200 shadow-md
+                           ${active
+                             ? 'bg-indigo-600/80 border-indigo-500/60 text-white hover:bg-indigo-500/80'
+                             : 'bg-slate-800/80 border-slate-700/60 text-slate-400 hover:text-white hover:bg-slate-700/80'}`}
+                title={title}
+              >
+                <Icon className="w-4 h-4" />
+              </button>
+            );
+          })}
+        </div>
 
         {/* Viewer Container */}
         <div className="flex-1 p-6 relative min-h-0 min-w-0">
@@ -678,11 +695,13 @@ function App() {
 
       </main>
 
-      {/* SegAgent Chat Panel */}
+      {/* SegAgent side panel (chat or QC) */}
       <div className={`flex-shrink-0 transition-all duration-300 ease-in-out overflow-hidden
         ${isChatOpen ? 'w-[26rem]' : 'w-0'}`}>
         <div className="w-[26rem] h-full">
-          <ChatPanel image={imageFile} onMask={handleAgentMask} />
+          {panelMode === 'chat'
+            ? <ChatPanel image={imageFile} onMask={handleAgentMask} />
+            : <QcPanel onMask={handleAgentMask} />}
         </div>
       </div>
     </div>

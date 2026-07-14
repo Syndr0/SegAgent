@@ -14,13 +14,26 @@ The embedder is injected (``embed_fn``) so we reuse VoxTell's already-loaded
 Qwen3-Embedding-4B instead of loading a second model.
 """
 
+import glob
 import json
+import os
 import re
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 SEMANTIC_MIN_SIM = 0.30  # below this the semantic match is considered too weak
+
+
+def _norm(s: str) -> str:
+    """Lowercase, keep CJK, turn _/- and punctuation into spaces, collapse ws.
+
+    Shared by the KBs so mask filenames like ``left_eye`` normalize to the same
+    string as the canonical name ``left eye``.
+    """
+    s = s.lower().replace("_", " ").replace("-", " ")
+    s = re.sub(r"[^\w一-鿿 ]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 class OARKnowledgeBase:
@@ -33,10 +46,7 @@ class OARKnowledgeBase:
         self._doc_embeds = None  # lazily computed (n_protocols, dim)
 
     # ------------------------------------------------------------- helpers
-    @staticmethod
-    def _norm(s: str) -> str:
-        # Keep CJK characters; only strip punctuation/symbols and lowercase ASCII.
-        return re.sub(r"[^\w一-鿿 ]+", " ", s.lower()).strip()
+    _norm = staticmethod(_norm)
 
     @staticmethod
     def _l2norm(x: np.ndarray) -> np.ndarray:
@@ -109,3 +119,60 @@ class OARKnowledgeBase:
         return (f'lookup_oar("{query}") -> matched "{p["site"]}" (via {how}). '
                 f"{len(oars)} OARs to delineate: {joined}. "
                 f'Segment them all in one call: segment("{joined}").')
+
+    def expected_oars_for(self, query: str):
+        """(site_name, [oars], how) for completeness checks, or (None, [], None)."""
+        p, how = self.lookup(query)
+        if p is None:
+            return None, [], None
+        return p["site"], list(p.get("oars", [])), how
+
+
+class OrganReferenceKB:
+    """Per-organ reference data (volume range, laterality, expected components).
+
+    Backs the deterministic QC checks. Loaded from a ``kind:"organ_reference"``
+    JSON; keys are normalized so lookups are robust to spacing/case/underscores.
+    """
+
+    def __init__(self, path: str):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.organs: Dict[str, dict] = {}
+        for name, ref in data.get("organs", {}).items():
+            entry = {"name": name}
+            entry.update(ref)
+            self.organs[_norm(name)] = entry
+
+    def get(self, organ: str) -> Optional[dict]:
+        """Reference entry for an organ name (normalized), or None."""
+        return self.organs.get(_norm(organ))
+
+
+def load_knowledge(knowledge_dir: str,
+                   embed_fn: Optional[Callable[[List[str]], np.ndarray]] = None
+                   ) -> Dict[str, object]:
+    """Auto-discover every ``knowledge/*.json`` and build the matching KB.
+
+    Extensibility hook: drop a JSON in ``knowledge/`` with a ``"kind"`` field
+    (``oar_protocols`` | ``organ_reference``) and it is picked up here. Kind is
+    inferred from the payload when the field is absent.
+    """
+    kbs: Dict[str, object] = {"oar_protocols": None, "organ_reference": None}
+    for path in sorted(glob.glob(os.path.join(knowledge_dir, "*.json"))):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        kind = data.get("kind")
+        if kind is None:  # infer from payload shape
+            if "protocols" in data:
+                kind = "oar_protocols"
+            elif "organs" in data:
+                kind = "organ_reference"
+        if kind == "oar_protocols":
+            kbs["oar_protocols"] = OARKnowledgeBase(path, embed_fn=embed_fn)
+        elif kind == "organ_reference":
+            kbs["organ_reference"] = OrganReferenceKB(path)
+    return kbs
