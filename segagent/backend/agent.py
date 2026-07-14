@@ -29,7 +29,6 @@ import torch
 import qc_checks
 import qc_experts
 import qc_metrics
-from knowledge_base import _norm as _kbnorm
 
 # Lazy heavy imports (transformers / qwen_vl_utils / PIL) happen inside
 # _ensure_llm so the FastAPI process still boots even if the LLM weights are
@@ -42,6 +41,10 @@ N_MONTAGE_SLICES = int(os.environ.get("SEGAGENT_MONTAGE_SLICES", "6"))
 # (the `I_k` image observation in the design). Kept small to bound context growth.
 N_OVERLAY_SLICES = int(os.environ.get("SEGAGENT_OVERLAY_SLICES", "3"))
 MAX_NEW_TOKENS = int(os.environ.get("SEGAGENT_MAX_NEW_TOKENS", "512"))
+# Surface-distance metrics (ASSD / HD95) in QC are off by default: they add two
+# full-volume distance transforms per organ. Dice/IoU/volume already flag
+# disagreement; enable with SEGAGENT_QC_SURFACE=1 if you want boundary metrics.
+QC_SURFACE = os.environ.get("SEGAGENT_QC_SURFACE", "0") == "1"
 
 SYSTEM_PROMPT = """You are SegAgent, a careful radiology reasoning assistant that \
 analyzes a single 3D medical scan (CT / MRI / PET) to answer the user's question.
@@ -110,17 +113,16 @@ or pelvis?"
 
 QC_SYSTEM_PROMPT = """You are SegAgent-QC, a radiotherapy contour \
 quality-control assistant. You review an EXISTING structure set (organs already \
-delineated by someone) and report problems — you do not draw anything.
+delineated by someone) and report problems with the contours — you do not draw \
+anything and you do NOT judge whether organs are missing.
 
-You are given: (1) grounding views of the scan, (2) the region and which guideline \
-OARs appear to be MISSING, and (3) automated per-organ findings — geometry checks \
-(volume vs normal range, connected components, left/right laterality, holes) and \
-agreement with an independent expert segmentation model (Dice / surface distance).
+You are given: (1) grounding views of the scan, and (2) automated per-organ \
+findings — geometry checks (volume vs normal range, connected components, \
+left/right laterality, holes) and agreement with an independent expert \
+segmentation model (Dice).
 
 Write a concise, clinically useful QC report:
 - An overall verdict (how many organs look fine / need review / look wrong).
-- Missing structures (少勾) that should probably be added for this region, each with \
-a one-line rationale.
 - For each flagged organ, the most likely problem in plain language (under- or \
 over-contour, left/right swap, fragmentation/stray voxels, interior holes, or \
 disagreement with the expert model) and what to check.
@@ -504,52 +506,31 @@ class SegAgent:
         except Exception:
             return None
 
-    def _completeness(self, organs: List[str]):
-        """Pick the best-matching protocol and diff present vs expected OARs.
-
-        Returns (region, expected, missing, unexpected).
-        """
-        if self.kb is None or not organs:
-            return None, [], [], list(organs)
-        present = {_kbnorm(o) for o in organs}
-        best = None  # (overlap, protocol, oar_norm_set)
-        for p in self.kb.protocols:
-            oar_norm = {_kbnorm(x) for x in p.get("oars", [])}
-            overlap = len(present & oar_norm)
-            if best is None or overlap > best[0]:
-                best = (overlap, p, oar_norm)
-        if best is None or best[0] == 0:
-            return None, [], [], list(organs)
-        _, proto, oar_norm = best
-        expected = list(proto.get("oars", []))
-        missing = [x for x in expected if _kbnorm(x) not in present]
-        unexpected = [o for o in organs if _kbnorm(o) not in oar_norm]
-        return proto["site"], expected, missing, unexpected
-
     def run_qc(self, ss, question: str = "") -> Iterator[dict]:
-        """Audit an existing structure set. Yields QC events + a final report.
+        """Audit an existing structure set for contour QUALITY (not completeness).
 
-        Deterministic completeness + per-organ geometry checks + a batched expert
-        cross-check produce the structured report; the LLM then writes a narrative.
+        Per-organ geometry checks + a batched expert cross-check produce the
+        structured report; the LLM then writes a narrative. `qc_phase` events keep
+        the UI informed during the long expert-segmentation step.
         """
         organs = list(ss.structures.keys())
         yield {"type": "qc_start", "structures": organs, "warnings": ss.warnings}
 
-        # 1) Completeness (missing / unexpected) from the OAR knowledge base.
-        region, expected, missing, unexpected = self._completeness(organs)
-        yield {"type": "qc_completeness", "region": region,
-               "missing": missing, "unexpected": unexpected}
-
-        # 2) Expert cross-check (one batched VoxTell pass over all present organs).
+        # Expert cross-check: ONE batched VoxTell pass over all present organs.
+        # This is the long step, so announce it first.
         xres = {}
         if self.predictor is not None and organs:
+            yield {"type": "qc_phase", "phase": "expert",
+                   "text": "Re-segmenting with the expert model (VoxTell)…"}
             expert = qc_experts.make_expert("voxtell", self.predictor)
             try:
-                xres = qc_experts.cross_check(ss, expert, with_surface=True)
+                xres = qc_experts.cross_check(ss, expert, with_surface=QC_SURFACE)
             except Exception as e:
                 yield {"type": "error", "text": f"expert cross-check failed: {e}"}
 
-        # 3) Per-organ deterministic checks; assemble rows + overlay flagged organs.
+        # Per-organ deterministic checks; assemble rows + overlay flagged organs.
+        yield {"type": "qc_phase", "phase": "checks",
+               "text": "Running per-organ checks…"}
         rows = []
         for organ in organs:
             info = ss.structures[organ]
@@ -585,12 +566,12 @@ class SegAgent:
 
         summary = {s: sum(r["status"] == s for r in rows)
                    for s in ("ok", "warn", "error")}
-        report = {"type": "qc_report", "region": region, "present": organs,
-                  "missing": missing, "unexpected": unexpected,
+        report = {"type": "qc_report", "present": organs,
                   "organs": rows, "summary": summary}
         yield report
 
-        # 4) LLM narrative synthesis over the findings.
+        # LLM narrative synthesis over the findings.
+        yield {"type": "qc_phase", "phase": "report", "text": "Writing the QC report…"}
         try:
             yield from self._qc_synthesis(ss, report, question)
         except Exception as e:
@@ -604,23 +585,17 @@ class SegAgent:
         except Exception:
             coronal, sagittal = None, None
 
-        lines = [f"Region: {report['region']}"]
-        if report["missing"]:
-            lines.append("MISSING OARs (少勾): " + ", ".join(report["missing"]))
-        if report["unexpected"]:
-            lines.append("Present but not in the expected set: "
-                         + ", ".join(report["unexpected"]))
-        lines.append("Per-organ findings:")
+        lines = ["Per-organ findings:"]
         for r in report["organs"]:
             fl = "; ".join(f["message"] for f in r["findings"]) or "no issues"
             lines.append(f'- {r["organ"]} [{r["status"]}] '
                          f'vol={r["volume_ml"]}mL dice={r["dice"]}: {fl}')
 
-        # Optional guideline RAG for the flagged / missing organs.
+        # Optional guideline RAG for the flagged organs.
         if self.guidelines is not None:
             flagged = [r["organ"] for r in report["organs"]
-                       if r["status"] != "ok"] + report["missing"]
-            query = "; ".join(flagged) or (report["region"] or "")
+                       if r["status"] != "ok"]
+            query = "; ".join(flagged)
             try:
                 passages = self.guidelines.retrieve(query, k=3) if query else []
             except Exception:
