@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Upload, Loader2, ShieldCheck, AlertTriangle, XCircle, CheckCircle2, Brain, ChevronDown, ChevronRight, ClipboardList } from 'lucide-react';
+import { Upload, Loader2, ShieldCheck, AlertTriangle, XCircle, CheckCircle2, Brain, ChevronDown, ChevronRight, ClipboardList, Circle } from 'lucide-react';
 
 const API = 'http://localhost:8000';
 
@@ -10,27 +10,25 @@ interface QcState {
   running: boolean;
   fileName: string | null;
   warnings: string[];
-  region: string | null;
-  missing: string[];
-  unexpected: string[];
-  organs: OrganRow[];
+  structures: string[];      // all contours to process (from qc_start)
+  phase: string | null;      // current phase text
+  organs: OrganRow[];        // completed rows
   thoughts: string[];
   report: string | null;
   error: string | null;
 }
 
 const EMPTY: QcState = {
-  running: false, fileName: null, warnings: [], region: null, missing: [],
-  unexpected: [], organs: [], thoughts: [], report: null, error: null,
+  running: false, fileName: null, warnings: [], structures: [],
+  phase: null, organs: [], thoughts: [], report: null, error: null,
 };
 
 const STATUS = {
-  ok: { icon: CheckCircle2, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/30', label: 'OK' },
-  warn: { icon: AlertTriangle, color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/30', label: 'Review' },
-  error: { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/30', label: 'Problem' },
+  ok: { icon: CheckCircle2, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/30' },
+  warn: { icon: AlertTriangle, color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/30' },
+  error: { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/30' },
 };
 
-// A produced expert mask can be pushed into the viewer if the parent wants it.
 interface QcPanelProps { onMask?: (maskId: string, prompt: string) => void; }
 
 export default function QcPanel({ onMask }: QcPanelProps) {
@@ -43,7 +41,7 @@ export default function QcPanel({ onMask }: QcPanelProps) {
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setSt({ ...EMPTY, running: true, fileName: file.name });
+    setSt({ ...EMPTY, running: true, fileName: file.name, phase: 'Reading structure set…' });
 
     try {
       const form = new FormData();
@@ -67,10 +65,10 @@ export default function QcPanel({ onMask }: QcPanelProps) {
           const ev = JSON.parse(line);
           switch (ev.type) {
             case 'qc_start':
-              patch({ warnings: ev.warnings || [] });
+              patch({ structures: ev.structures || [], warnings: ev.warnings || [], phase: 'Preparing…' });
               break;
-            case 'qc_completeness':
-              patch({ region: ev.region, missing: ev.missing || [], unexpected: ev.unexpected || [] });
+            case 'qc_phase':
+              patch({ phase: ev.text });
               break;
             case 'qc_organ':
               patch(s => ({ ...s, organs: [...s.organs, ev as OrganRow] }));
@@ -82,19 +80,18 @@ export default function QcPanel({ onMask }: QcPanelProps) {
               patch(s => ({ ...s, thoughts: [...s.thoughts, ev.text] }));
               break;
             case 'answer':
-              patch({ report: ev.text });
+              patch({ report: ev.text, phase: null });
               break;
             case 'error':
               patch(s => ({ ...s, error: ev.text }));
               break;
-            // qc_report is redundant with the incremental organ rows; ignore.
           }
         }
       }
     } catch (err) {
       patch({ error: err instanceof Error ? err.message : String(err) });
     } finally {
-      patch({ running: false });
+      patch({ running: false, phase: null });
       if (fileRef.current) fileRef.current.value = '';
     }
   };
@@ -103,13 +100,17 @@ export default function QcPanel({ onMask }: QcPanelProps) {
     (a, o) => ({ ...a, [o.status]: a[o.status] + 1 }),
     { ok: 0, warn: 0, error: 0 } as Record<string, number>,
   );
+  const total = st.structures.length;
+  const done = st.organs.length;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const rowByOrgan = new Map(st.organs.map(o => [o.organ, o]));
 
   return (
     <div className="flex flex-col h-full bg-slate-900/40 border-l border-slate-800">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800 flex-shrink-0">
         <ShieldCheck className="w-4 h-4 text-indigo-400" />
         <span className="text-sm font-semibold text-slate-200">Contour QC</span>
-        <span className="text-[10px] text-slate-500 ml-auto">geometry + expert + guidelines</span>
+        <span className="text-[10px] text-slate-500 ml-auto">geometry + expert model</span>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -136,41 +137,52 @@ export default function QcPanel({ onMask }: QcPanelProps) {
           <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">{st.error}</div>
         )}
 
-        {/* Overall */}
-        {(st.region || st.organs.length > 0) && (
+        {/* Phase + progress */}
+        {st.running && (
+          <div className="space-y-2">
+            {st.phase && (
+              <div className="flex items-center gap-2 text-xs text-indigo-300">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> {st.phase}
+              </div>
+            )}
+            {total > 0 && (
+              <div>
+                <div className="flex justify-between text-[10px] text-slate-500 mb-1">
+                  <span>Contours checked</span><span>{done}/{total}</span>
+                </div>
+                <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                  <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Overall counts */}
+        {st.organs.length > 0 && (
           <div className="flex items-center gap-3 text-xs">
-            {st.region && <span className="px-2 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300">{st.region}</span>}
             <span className="text-emerald-400">{counts.ok} ok</span>
             <span className="text-amber-400">{counts.warn} review</span>
             <span className="text-red-400">{counts.error} problem</span>
           </div>
         )}
 
-        {/* Missing (少勾) */}
-        {st.missing.length > 0 && (
-          <div className="bg-amber-500/5 border border-amber-500/30 rounded-xl p-3">
-            <div className="flex items-center gap-2 text-xs font-semibold text-amber-300 mb-1.5">
-              <AlertTriangle className="w-3.5 h-3.5" /> Missing structures ({st.missing.length})
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {st.missing.map(m => (
-                <span key={m} className="text-[11px] px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-200 border border-amber-500/20">{m}</span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Per-organ rows */}
-        {st.organs.length > 0 && (
+        {/* Checklist: every contour, pending until its result arrives */}
+        {st.structures.length > 0 && (
           <div className="space-y-1.5">
-            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Contours ({st.organs.length})</div>
-            {st.organs.map(o => <OrganCard key={o.organ} row={o} />)}
-          </div>
-        )}
-
-        {st.unexpected.length > 0 && (
-          <div className="text-[11px] text-slate-500">
-            Not in expected set: {st.unexpected.join(', ')}
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Contours ({total})</div>
+            {st.structures.map(name => {
+              const row = rowByOrgan.get(name);
+              return row
+                ? <OrganCard key={name} row={row} />
+                : (
+                  <div key={name} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-slate-800 bg-slate-800/20 text-slate-500">
+                    {st.running ? <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" /> : <Circle className="w-3.5 h-3.5 flex-shrink-0" />}
+                    <span className="text-sm truncate">{name}</span>
+                    <span className="text-[10px] ml-auto">pending</span>
+                  </div>
+                );
+            })}
           </div>
         )}
 
