@@ -58,14 +58,28 @@ def create_case(
     name = image.filename or "image.nii.gz"
     if not name.lower().endswith((".nii", ".nii.gz")):
         raise HTTPException(status_code=400, detail="The case image must be NIfTI (.nii/.nii.gz).")
+    contour_files = contours or []
+    contour_names = [contour.filename or "contour.nii.gz" for contour in contour_files]
+    invalid = [
+        contour_name
+        for contour_name in contour_names
+        if not contour_name.lower().endswith((".nii", ".nii.gz"))
+    ]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Contour files must be NIfTI (.nii/.nii.gz): {invalid[0]}",
+        )
     services = get_services()
     try:
         record = services.store.create_case(name, image.file)
-        for contour in contours or []:
-            contour_name = contour.filename or "contour.nii.gz"
-            if not contour_name.lower().endswith((".nii", ".nii.gz")):
-                raise ValueError(f"unsupported contour file: {contour_name}")
-            services.store.add_contour(record.case_id, contour_name, contour.file)
+        services.store.add_contours(
+            record.case_id,
+            [
+                (contour_name, contour.file)
+                for contour, contour_name in zip(contour_files, contour_names, strict=True)
+            ],
+        )
         return services.store.get_case(record.case_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -77,6 +91,42 @@ def get_case(case_id: str):
         return get_services().store.get_case(case_id)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Case not found") from exc
+
+
+@app.post("/api/cases/{case_id}/contours")
+def add_case_contours(
+    case_id: str,
+    contours: Annotated[list[UploadFile], File()],
+):
+    """Add contour masks to an existing case.
+
+    Keeping this separate from case creation lets the UI create a case as soon
+    as its image is selected and attach QC contours later.
+    """
+    if not contours:
+        raise HTTPException(status_code=400, detail="Select at least one contour file.")
+    names = [contour.filename or "contour.nii.gz" for contour in contours]
+    invalid = [name for name in names if not name.lower().endswith((".nii", ".nii.gz"))]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Contour files must be NIfTI (.nii/.nii.gz): {invalid[0]}",
+        )
+    services = get_services()
+    try:
+        services.store.get_case(case_id)
+        services.store.add_contours(
+            case_id,
+            [
+                (name, contour.file)
+                for contour, name in zip(contours, names, strict=True)
+            ],
+        )
+        return services.store.get_case(case_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Case not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/cases/{case_id}/image")
@@ -131,4 +181,3 @@ def get_run(run_id: str):
         }
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Run not found") from exc
-

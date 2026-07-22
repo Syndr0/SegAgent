@@ -70,6 +70,17 @@ npm install
 npm run dev
 ```
 
+In the app:
+
+1. Choose **Upload scan**. The case is created as soon as the upload finishes.
+2. Choose **Add contours** if you want to run QC on existing contours.
+3. Enter a request, or use an example, and choose **Run**.
+4. When **Review results** appears, inspect each mask in the viewer. Approve it,
+   request changes with a note, or reject it.
+
+The last case and run are restored after a page refresh when they are still
+available on the local backend.
+
 The first real agent run lazily loads the configured planner and VoxTell.
 Set `SEGAGENT_PLANNER=rule` to exercise the workflow without an LLM, or
 `SEGAGENT_PLANNER=qwen` for the local multimodal planner.

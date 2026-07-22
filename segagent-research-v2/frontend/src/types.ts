@@ -44,7 +44,9 @@ export interface RunEvent {
     confidence?: number;
     message?: string;
     observation?: { tool?: string; summary?: string };
+    query?: string;
     rationale_summary?: string;
+    structures?: string[];
     text?: string;
     tool?: string;
   };
@@ -53,6 +55,7 @@ export interface RunEvent {
 export interface ViewerMask extends ArtifactRef {
   visible: boolean;
   color: string;
+  swatch: string;
 }
 
 export interface ApprovalRequest {
@@ -60,4 +63,17 @@ export interface ApprovalRequest {
   summary: string;
   artifacts: ArtifactRef[];
   allowed_decisions: Array<'approve' | 'reject' | 'feedback'>;
+}
+
+export interface RunRecord {
+  run_id: string;
+  case_id: string;
+  question: string;
+  status: 'created' | 'running' | 'waiting_approval' | 'completed' | 'failed';
+  final_answer?: string | null;
+}
+
+export interface RunHistory {
+  run: RunRecord;
+  events: RunEvent[];
 }
