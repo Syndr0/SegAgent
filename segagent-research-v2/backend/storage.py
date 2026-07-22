@@ -170,22 +170,68 @@ class ResearchStore:
         return ref
 
     def add_contour(self, case_id: str, name: str, stream: BinaryIO) -> ArtifactRef:
-        clean = safe_filename(name, "contour.nii.gz")
-        suffix = ".nii.gz" if clean.casefold().endswith(".nii.gz") else ".nii"
-        artifact_id, path = self.allocate_artifact_path(case_id, suffix)
-        with path.open("wb") as handle:
-            while chunk := stream.read(1024 * 1024):
-                handle.write(chunk)
-        label = clean.removesuffix(".nii.gz").removesuffix(".nii").replace("_", " ")
-        return self.register_artifact(
-            case_id,
-            artifact_id,
-            path,
-            "contour",
-            label,
-            "application/gzip" if suffix == ".nii.gz" else "application/octet-stream",
-            contour=True,
-        )
+        return self.add_contours(case_id, [(name, stream)])[0]
+
+    def add_contours(
+        self,
+        case_id: str,
+        uploads: list[tuple[str, BinaryIO]],
+    ) -> list[ArtifactRef]:
+        """Store a contour batch and register it with one case update.
+
+        Files are removed if any item fails, so a multi-file upload never leaves
+        a partly registered batch behind.
+        """
+        self.get_case(case_id)
+        if not uploads:
+            return []
+        staged: list[tuple[ArtifactRef, Path]] = []
+        created_paths: list[Path] = []
+        try:
+            for name, stream in uploads:
+                clean = safe_filename(name, "contour.nii.gz")
+                suffix = ".nii.gz" if clean.casefold().endswith(".nii.gz") else ".nii"
+                artifact_id, path = self.allocate_artifact_path(case_id, suffix)
+                # Track the path before writing so a failed stream is cleaned up.
+                created_paths.append(path)
+                label = (
+                    clean.removesuffix(".nii.gz")
+                    .removesuffix(".nii")
+                    .replace("_", " ")
+                )
+                with path.open("wb") as handle:
+                    while chunk := stream.read(1024 * 1024):
+                        handle.write(chunk)
+                if path.stat().st_size == 0:
+                    raise ValueError(f"contour file is empty: {clean}")
+                ref = ArtifactRef(
+                    artifact_id=artifact_id,
+                    case_id=case_id,
+                    kind="contour",
+                    label=label,
+                    media_type=(
+                        "application/gzip"
+                        if suffix == ".nii.gz"
+                        else "application/octet-stream"
+                    ),
+                    sha256=_sha256(path),
+                    metadata={
+                        "relative_path": str(path.relative_to(self.case_dir(case_id)))
+                    },
+                )
+                staged.append((ref, path))
+
+            with self._lock:
+                case = self.get_case(case_id)
+                refs = [ref for ref, _ in staged]
+                case.artifacts.extend(refs)
+                case.contours.extend(refs)
+                self._write_case(case)
+            return refs
+        except Exception:
+            for path in created_paths:
+                path.unlink(missing_ok=True)
+            raise
 
     def create_run(self, case_id: str, question: str) -> RunRecord:
         self.get_case(case_id)

@@ -58,6 +58,24 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(store.artifact_path(contour).suffix, ".nii")
             self.assertEqual(contour.media_type, "application/octet-stream")
 
+    def test_contour_batch_rolls_back_when_a_file_is_empty(self) -> None:
+        with TemporaryDirectory() as temp:
+            store = ResearchStore(Path(temp))
+            case = store.create_case("image.nii", BytesIO(b"image"))
+
+            with self.assertRaisesRegex(ValueError, "contour file is empty"):
+                store.add_contours(
+                    case.case_id,
+                    [
+                        ("left_kidney.nii", BytesIO(b"first")),
+                        ("right_kidney.nii", BytesIO(b"")),
+                    ],
+                )
+
+            restored = store.get_case(case.case_id)
+            self.assertEqual(restored.contours, [])
+            self.assertEqual(restored.artifacts, [restored.image])
+
 
 if __name__ == "__main__":
     unittest.main()
