@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0-research",
+  "notice": "Illustrative adult intervals for software testing only. They are not clinical reference standards. Validate population, scan extent and protocol, then attach citations before clinical research.",
+  "organs": {
+    "brain": {"volume_ml": [1000, 1600], "laterality": "midline", "expected_components": 1},
+    "brainstem": {"volume_ml": [15, 45], "laterality": "midline", "expected_components": 1},
+    "spinal cord": {"volume_ml": null, "laterality": "midline", "expected_components": 1},
+    "left eye": {"volume_ml": [5, 10], "laterality": "left", "expected_components": 1},
+    "right eye": {"volume_ml": [5, 10], "laterality": "right", "expected_components": 1},
+    "left parotid gland": {"volume_ml": [10, 45], "laterality": "left", "expected_components": 1},
+    "right parotid gland": {"volume_ml": [10, 45], "laterality": "right", "expected_components": 1},
+    "left submandibular gland": {"volume_ml": [4, 14], "laterality": "left", "expected_components": 1},
+    "right submandibular gland": {"volume_ml": [4, 14], "laterality": "right", "expected_components": 1},
+    "heart": {"volume_ml": [400, 950], "laterality": "midline", "expected_components": 1},
+    "left lung": {"volume_ml": [900, 3000], "laterality": "left", "expected_components": 1},
+    "right lung": {"volume_ml": [1000, 3200], "laterality": "right", "expected_components": 1},
+    "left humeral head": {"volume_ml": [20, 90], "laterality": "left", "expected_components": 1},
+    "right humeral head": {"volume_ml": [20, 90], "laterality": "right", "expected_components": 1},
+    "liver": {"volume_ml": [1000, 2200], "laterality": "right", "expected_components": 1},
+    "left kidney": {"volume_ml": [90, 260], "laterality": "left", "expected_components": 1},
+    "right kidney": {"volume_ml": [90, 260], "laterality": "right", "expected_components": 1},
+    "spleen": {"volume_ml": [80, 350], "laterality": "left", "expected_components": 1},
+    "pancreas": {"volume_ml": [40, 140], "laterality": "midline", "expected_components": 1},
+    "left adrenal gland": {"volume_ml": [1, 9], "laterality": "left", "expected_components": 1},
+    "right adrenal gland": {"volume_ml": [1, 9], "laterality": "right", "expected_components": 1},
+    "bladder": {"volume_ml": null, "laterality": "midline", "expected_components": 1},
+    "rectum": {"volume_ml": null, "laterality": "midline", "expected_components": 1},
+    "prostate": {"volume_ml": [15, 90], "laterality": "midline", "expected_components": 1},
+    "left femoral head": {"volume_ml": [25, 90], "laterality": "left", "expected_components": 1},
+    "right femoral head": {"volume_ml": [25, 90], "laterality": "right", "expected_components": 1},
+    "uterus": {"volume_ml": [30, 200], "laterality": "midline", "expected_components": 1},
+    "left ovary": {"volume_ml": [2, 20], "laterality": "left", "expected_components": 1},
+    "right ovary": {"volume_ml": [2, 20], "laterality": "right", "expected_components": 1},
+    "sacrum": {"volume_ml": [60, 220], "laterality": "midline", "expected_components": 1}
+  }
+}
+
