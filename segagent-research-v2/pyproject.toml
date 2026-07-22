@@ -1,0 +1,13 @@
+[project]
+name = "segagent-research-v2"
+version = "0.2.0"
+description = "Evidence-first research framework for agentic 3D medical-image segmentation"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["backend"]
+branch = true

@@ -1,0 +1,7 @@
+{"id":"explicit-kidneys","question":"Segment the left kidney and right kidney.","expected_first_action":"segment","expected_structures":["left kidney","right kidney"],"expect_abstention":false}
+{"id":"pelvic-oars","question":"Contour all OARs for a prostate radiotherapy plan.","expected_first_action":"lookup_protocol","expected_site":"Pelvis","expected_second_action":"segment","expected_structures":["bladder","rectum","left femoral head","right femoral head"],"expect_abstention":false}
+{"id":"thorax-oars","question":"Which OARs should be segmented for a thoracic radiation plan?","expected_first_action":"lookup_protocol","expected_site":"Thorax","expected_second_action":"segment","expected_structures":["heart","left lung","right lung","spinal cord"],"expect_abstention":false}
+{"id":"qc-request","question":"Run QC and audit the uploaded contours.","expected_first_action":"run_qc","expect_abstention":false}
+{"id":"ambiguous","question":"Can you take a look at this?","expected_first_action":"ask_user","expect_abstention":true}
+{"id":"explicit-liver","question":"Please segment the liver.","expected_first_action":"segment","expected_structures":["liver"],"expect_abstention":false}
+

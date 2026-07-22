@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0-research",
+  "notice": "Research seed data. Replace each entry with an institution-approved, versioned and cited protocol before clinical evaluation.",
+  "protocols": [
+    {
+      "id": "brain-oar-research-v1",
+      "site": "Brain",
+      "aliases": ["brain", "cranial", "intracranial", "glioma", "brain metastasis", "SRS", "脑", "颅内"],
+      "description": "Research seed list for cranial radiotherapy contour experiments.",
+      "oars": ["brain", "brainstem", "spinal cord", "optic chiasm", "left optic nerve", "right optic nerve", "left eye", "right eye", "left lens", "right lens", "pituitary gland", "left cochlea", "right cochlea", "left hippocampus", "right hippocampus"],
+      "source": "Research seed registry; institution approval required",
+      "source_version": "2026-07-research",
+      "citations": []
+    },
+    {
+      "id": "head-neck-oar-research-v1",
+      "site": "Head and Neck",
+      "aliases": ["head and neck", "H&N", "nasopharynx", "oropharynx", "larynx", "oral cavity", "头颈", "鼻咽"],
+      "description": "Research seed list for head-and-neck contour workflow experiments.",
+      "oars": ["brainstem", "spinal cord", "left parotid gland", "right parotid gland", "left submandibular gland", "right submandibular gland", "larynx", "oral cavity", "mandible", "left optic nerve", "right optic nerve", "optic chiasm", "left eye", "right eye", "left cochlea", "right cochlea", "thyroid gland", "esophagus"],
+      "source": "Research seed registry; institution approval required",
+      "source_version": "2026-07-research",
+      "citations": []
+    },
+    {
+      "id": "thorax-oar-research-v1",
+      "site": "Thorax",
+      "aliases": ["thorax", "thoracic", "chest", "lung", "lung cancer", "mediastinum", "esophageal cancer", "胸部", "肺癌"],
+      "description": "Research seed list for thoracic contour workflow experiments.",
+      "oars": ["heart", "left lung", "right lung", "spinal cord", "esophagus", "trachea", "aorta", "superior vena cava", "left humeral head", "right humeral head", "thyroid gland", "pulmonary artery"],
+      "source": "Research seed registry; institution approval required",
+      "source_version": "2026-07-research",
+      "citations": []
+    },
+    {
+      "id": "breast-oar-research-v1",
+      "site": "Breast",
+      "aliases": ["breast", "breast cancer", "chest wall", "mastectomy", "lumpectomy", "乳腺", "乳房"],
+      "description": "Research seed list for breast contour workflow experiments.",
+      "oars": ["heart", "left lung", "right lung", "spinal cord", "esophagus", "left humeral head", "right humeral head", "thyroid gland", "trachea"],
+      "source": "Research seed registry; institution approval required",
+      "source_version": "2026-07-research",
+      "citations": []
+    },
+    {
+      "id": "upper-abdomen-oar-research-v1",
+      "site": "Upper Abdomen",
+      "aliases": ["upper abdomen", "abdomen", "liver", "pancreas", "stomach", "kidney", "renal", "腹部", "肝", "胰腺", "肾"],
+      "description": "Research seed list for upper-abdominal contour workflow experiments.",
+      "oars": ["liver", "left kidney", "right kidney", "spleen", "stomach", "duodenum", "pancreas", "gallbladder", "spinal cord", "small bowel", "colon", "left adrenal gland", "right adrenal gland", "esophagus", "aorta", "inferior vena cava"],
+      "source": "Research seed registry; institution approval required",
+      "source_version": "2026-07-research",
+      "citations": []
+    },
+    {
+      "id": "pelvis-oar-research-v1",
+      "site": "Pelvis",
+      "aliases": ["pelvis", "pelvic", "prostate", "rectum", "cervix", "bladder", "anal canal", "盆腔", "前列腺", "直肠", "膀胱"],
+      "description": "Research seed list for pelvic contour workflow experiments.",
+      "oars": ["bladder", "rectum", "left femoral head", "right femoral head", "sigmoid colon", "small bowel", "colon", "prostate", "seminal vesicles", "penile bulb", "anal canal", "urethra", "uterus", "cervix", "vagina", "left ovary", "right ovary", "cauda equina", "sacrum"],
+      "source": "Research seed registry; institution approval required",
+      "source_version": "2026-07-research",
+      "citations": []
+    }
+  ]
+}
+
