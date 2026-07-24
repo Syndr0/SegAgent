@@ -94,7 +94,31 @@ class HybridKnowledgeBase:
         )
 
     @staticmethod
-    def _load_guidelines(folder: Path) -> list[dict]:
+    def _parse_front_matter(text: str) -> tuple[dict[str, str], str]:
+        """Read a simple ``key: value`` header at the top of a document.
+
+        Lets an authorized guideline carry its own citation, source, and version
+        so retrieval can attribute passages precisely instead of guessing.
+        """
+        meta: dict[str, str] = {}
+        keys = {"source", "version", "date", "citation", "jurisdiction", "url", "title"}
+        lines = text.splitlines()
+        index = 0
+        while index < len(lines):
+            line = lines[index].strip()
+            if not line:
+                index += 1
+                continue
+            match = re.match(r"^([A-Za-z]+)\s*:\s*(.+)$", line)
+            if match and match.group(1).casefold() in keys:
+                meta[match.group(1).casefold()] = match.group(2).strip()
+                index += 1
+                continue
+            break
+        return meta, "\n".join(lines[index:])
+
+    @classmethod
+    def _load_guidelines(cls, folder: Path) -> list[dict]:
         chunks: list[dict] = []
         if not folder.exists():
             return chunks
@@ -103,27 +127,45 @@ class HybridKnowledgeBase:
                 continue
             if path.name.casefold() == "readme.md":
                 continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            meta, text = cls._parse_front_matter(
+                path.read_text(encoding="utf-8", errors="ignore")
+            )
+            source_label = meta.get("title") or meta.get("source") or path.name
+            base_citation = meta.get("citation")
+            version = meta.get("version")
             section = "Document"
             buffer: list[str] = []
+
+            def flush(force: bool) -> None:
+                nonlocal buffer
+                joined = "\n\n".join(buffer).strip()
+                if not joined or (not force and len(joined) < 900):
+                    return
+                chunks.append(
+                    {
+                        "text": joined,
+                        "source": source_label,
+                        "section": section,
+                        "citation": base_citation or f"[{source_label} § {section}]",
+                        "version": version,
+                    }
+                )
+                # Carry the last block forward so passages split across a chunk
+                # boundary keep their context (overlap).
+                buffer = buffer[-1:] if len(buffer) > 1 else []
+
             for block in re.split(r"\n\s*\n", text):
                 block = block.strip()
                 if not block:
                     continue
                 if block.startswith("#"):
+                    flush(force=True)
                     section = block.lstrip("# ").strip() or section
+                    buffer = []
                     continue
                 buffer.append(block)
-                joined = "\n\n".join(buffer)
-                if len(joined) >= 900:
-                    chunks.append(
-                        {"text": joined, "source": path.name, "section": section}
-                    )
-                    buffer = []
-            if buffer:
-                chunks.append(
-                    {"text": "\n\n".join(buffer), "source": path.name, "section": section}
-                )
+                flush(force=False)
+            flush(force=True)
         return chunks
 
     @staticmethod
@@ -205,7 +247,7 @@ class HybridKnowledgeBase:
             if score < 0.12:
                 continue
             item = self.guidelines[int(index)]
-            citation = f'[{item["source"]} § {item["section"]}]'
+            citation = item.get("citation") or f'[{item["source"]} § {item["section"]}]'
             hits.append(
                 RetrievalHit(
                     text=item["text"],
@@ -216,3 +258,19 @@ class HybridKnowledgeBase:
                 )
             )
         return hits
+
+    def retrieve_for_structures(
+        self, structures: list[str], k_each: int = 2
+    ) -> dict[str, list[RetrievalHit]]:
+        """Entity-keyed retrieval: guideline passages per named structure.
+
+        A precise, structure-scoped query retrieves far more reliably than one
+        query built from a vague sentence, so routing binds retrieval to the
+        structures the agent already knows.
+        """
+        results: dict[str, list[RetrievalHit]] = {}
+        for structure in structures:
+            name = " ".join(str(structure).strip().split())
+            if name and name not in results:
+                results[name] = self.retrieve_guidelines(name, k_each)
+        return results

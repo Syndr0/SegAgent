@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from .config import Settings, get_settings
 from .expert import VoxTellBackend
+from .intent import IntentClassifier
 from .knowledge import HybridKnowledgeBase
 from .observability import Tracing
 from .planner import QwenStructuredPlanner, RulePlanner
@@ -44,6 +45,7 @@ class AppServices:
         )
         self.qc_tool = ContourQCTool(self.qc_engine)
         self.critic = EvidenceCritic()
+        self.intent_classifier = IntentClassifier.from_knowledge(self.knowledge)
         self.graph = SegAgentGraph(
             settings,
             self.planner,
@@ -53,7 +55,7 @@ class AppServices:
             self.critic,
             Tracing(),
         )
-        self.workflow = WorkflowService(self.store, self.graph)
+        self.workflow = WorkflowService(self.store, self.graph, self.intent_classifier)
 
 
 @lru_cache(maxsize=1)

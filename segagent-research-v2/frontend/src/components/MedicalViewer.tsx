@@ -50,7 +50,7 @@ export default function MedicalViewer({
     let observer: ResizeObserver | null = null;
     let cancelled = false;
     const nv = new Niivue({
-      backColor: [0.015, 0.03, 0.055, 1],
+      backColor: [0.047, 0.051, 0.059, 1],
       show3Dcrosshair: true,
     });
     niivueRef.current = nv;

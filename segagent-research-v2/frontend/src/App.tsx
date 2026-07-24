@@ -24,6 +24,7 @@ import {
   getRun,
   resumeRun,
   startRun,
+  uploadEditedMask,
 } from './api';
 import MedicalViewer from './components/MedicalViewer';
 import TracePanel from './components/TracePanel';
@@ -112,6 +113,7 @@ export default function App() {
   const activeCaseId = useRef('');
   const requestController = useRef<AbortController | null>(null);
   const reviewRef = useRef<HTMLElement>(null);
+  const editFileRef = useRef<HTMLInputElement>(null);
 
   const answer = useMemo(
     () => [...events].reverse().find(event => event.type === 'answer')?.payload.text,
@@ -374,6 +376,63 @@ export default function App() {
     }
   };
 
+  const modifyContour = async (file: File) => {
+    if (!runId || !caseRecord || busy !== 'idle' || !approval) return;
+    const target = approval.artifacts?.[0];
+    const currentApproval = approval;
+    const expectedCaseId = caseRecord.case_id;
+    const controller = new AbortController();
+    requestController.current = controller;
+    setBusy('reviewing');
+    setApproval(null);
+    setError('');
+    setNotice('Uploading edited contour…');
+    const stream: { outcome: StreamOutcome; approval: ApprovalRequest | null } = {
+      outcome: 'unknown',
+      approval: null,
+    };
+    try {
+      const ref = await uploadEditedMask(
+        expectedCaseId,
+        target?.label || 'edited contour',
+        file,
+        target?.artifact_id,
+        'unknown',
+        controller.signal,
+      );
+      setNotice('Saving edited contour…');
+      await resumeRun(
+        runId,
+        'modify',
+        '',
+        event => {
+          if (event.type === 'approval_required') {
+            stream.outcome = 'approval';
+            stream.approval = approvalFromEvent(event);
+          }
+          if (event.type === 'run_completed') stream.outcome = 'completed';
+          if (event.type === 'error') stream.outcome = 'failed';
+          acceptEvent(event, expectedCaseId);
+        },
+        controller.signal,
+        ref.artifact_id,
+      );
+      if (stream.outcome === 'approval') setNotice('More masks need review.');
+      else if (stream.outcome === 'completed') setNotice('Run complete.');
+      else if (stream.outcome === 'failed') setNotice('');
+      else setNotice('Edited contour saved.');
+    } catch (caught) {
+      if (!isAbortError(caught)) {
+        setNotice('');
+        setApproval(stream.approval || currentApproval);
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    } finally {
+      requestController.current = null;
+      setBusy('idle');
+    }
+  };
+
   const onQuestionKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
       event.preventDefault();
@@ -404,7 +463,7 @@ export default function App() {
   };
 
   const locked = busy !== 'idle';
-  const reviewActions: ReadonlyArray<'approve' | 'feedback' | 'reject'> = approval?.allowed_decisions?.length
+  const reviewActions: ReadonlyArray<'approve' | 'feedback' | 'reject' | 'modify'> = approval?.allowed_decisions?.length
     ? approval.allowed_decisions
     : ['approve', 'feedback', 'reject'];
   const reviewMasks = approval?.artifacts || [];
@@ -594,10 +653,24 @@ export default function App() {
               {reviewActions.includes('feedback') && (
                 <button type="button" className="feedback" disabled={busy !== 'idle' || !reviewFeedback.trim()} onClick={() => review('feedback')}><AlertTriangle size={16} /> Request changes</button>
               )}
+              {reviewActions.includes('modify') && (
+                <button type="button" className="feedback" disabled={busy !== 'idle'} onClick={() => editFileRef.current?.click()} title="Upload an edited contour (.nii/.nii.gz)"><FileCheck2 size={16} /> Upload edit</button>
+              )}
               {reviewActions.includes('reject') && (
                 <button type="button" className="reject" disabled={busy !== 'idle'} onClick={() => review('reject')}><X size={16} /> Reject</button>
               )}
             </div>
+            <input
+              ref={editFileRef}
+              type="file"
+              accept=".nii,.nii.gz"
+              className="visually-hidden"
+              onChange={event => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (file) void modifyContour(file);
+              }}
+            />
           </section>
         )}
 
