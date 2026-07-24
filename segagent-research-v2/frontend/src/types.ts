@@ -62,7 +62,7 @@ export interface ApprovalRequest {
   message: string;
   summary: string;
   artifacts: ArtifactRef[];
-  allowed_decisions: Array<'approve' | 'reject' | 'feedback'>;
+  allowed_decisions: Array<'approve' | 'reject' | 'feedback' | 'modify'>;
 }
 
 export interface RunRecord {

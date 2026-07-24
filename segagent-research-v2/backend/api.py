@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .a2a import router as a2a_router
+from .imaging import load_mask, load_volume
 from .schemas import ApprovalDecision
 from .service import get_services
 
@@ -147,6 +148,59 @@ def get_artifact(case_id: str, artifact_id: str):
         return FileResponse(path, media_type=ref.media_type, filename=ref.label)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Artifact not found") from exc
+
+
+@app.post("/api/cases/{case_id}/edited-mask")
+def upload_edited_mask(
+    case_id: str,
+    structure: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
+    derived_from: Annotated[str | None, Form()] = None,
+    target_type: Annotated[str, Form()] = "unknown",
+):
+    """Register a reviewer's edited contour after validating it against the case grid.
+
+    The edited mask must sit on the same image grid as the case (NiiVue exports
+    on the background volume, so this holds by construction); a mismatch is
+    rejected rather than silently corrupting the evidence.
+    """
+    name = file.filename or "edited.nii.gz"
+    if not name.lower().endswith((".nii", ".nii.gz")):
+        raise HTTPException(status_code=400, detail="Edited mask must be NIfTI (.nii/.nii.gz).")
+    services = get_services()
+    store = services.store
+    try:
+        case = store.get_case(case_id)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail="Case not found") from exc
+    reference = load_volume(store.artifact_path(case.image))
+    suffix = ".nii.gz" if name.lower().endswith(".nii.gz") else ".nii"
+    artifact_id, path = store.allocate_artifact_path(case_id, suffix)
+    with path.open("wb") as handle:
+        while chunk := file.file.read(1024 * 1024):
+            handle.write(chunk)
+    try:
+        load_mask(path, reference)
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400, detail=f"Edited mask does not match the case grid: {exc}"
+        ) from exc
+    label = " ".join(str(structure).strip().split()) or "edited contour"
+    return store.register_artifact(
+        case_id,
+        artifact_id,
+        path,
+        "mask",
+        label,
+        "application/gzip" if suffix == ".nii.gz" else "application/octet-stream",
+        {
+            "source_model": "human_edit",
+            "source_version": "1",
+            "derived_from": derived_from,
+            "target_type": target_type,
+        },
+    )
 
 
 @app.post("/api/cases/{case_id}/runs")

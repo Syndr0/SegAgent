@@ -1,4 +1,4 @@
-import type { ApprovalRequest, CaseRecord, RunEvent, RunHistory } from './types';
+import type { ApprovalRequest, ArtifactRef, CaseRecord, RunEvent, RunHistory } from './types';
 
 export const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
@@ -128,18 +128,45 @@ export async function startRun(
 
 export async function resumeRun(
   runId: string,
-  decision: 'approve' | 'reject' | 'feedback',
+  decision: 'approve' | 'reject' | 'feedback' | 'modify',
   feedback: string,
   onEvent: (event: RunEvent) => void,
   signal?: AbortSignal,
+  editedMaskId?: string,
 ): Promise<void> {
   const response = await fetch(`${API}/api/runs/${runId}/resume`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ decision, feedback: feedback || null }),
+    body: JSON.stringify({
+      decision,
+      feedback: feedback || null,
+      edited_mask_id: editedMaskId || null,
+    }),
     signal,
   });
   await readEventStream(response, onEvent);
+}
+
+export async function uploadEditedMask(
+  caseId: string,
+  structure: string,
+  file: File,
+  derivedFrom?: string,
+  targetType: string = 'unknown',
+  signal?: AbortSignal,
+): Promise<ArtifactRef> {
+  const form = new FormData();
+  form.append('structure', structure);
+  form.append('file', file);
+  if (derivedFrom) form.append('derived_from', derivedFrom);
+  form.append('target_type', targetType);
+  const response = await fetch(`${API}/api/cases/${caseId}/edited-mask`, {
+    method: 'POST',
+    body: form,
+    signal,
+  });
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response.json();
 }
 
 export const caseImageUrl = (caseId: string) => `${API}/api/cases/${caseId}/image`;

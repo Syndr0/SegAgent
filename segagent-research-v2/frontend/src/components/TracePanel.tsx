@@ -5,11 +5,14 @@ import {
   CheckCircle2,
   Database,
   GitBranch,
+  Loader2,
   ScanLine,
   ShieldCheck,
   Wrench,
   type LucideIcon,
 } from 'lucide-react';
+
+const FINISHED_TYPES = new Set(['run_completed', 'error', 'answer', 'approval_required']);
 import type { RunEvent } from '../types';
 
 const ACTIONS: Record<string, string> = {
@@ -104,14 +107,19 @@ export default function TracePanel({ events }: { events: RunEvent[] }) {
     return <div className="trace-empty">Run steps will appear here.</div>;
   }
 
+  const lastEvent = visible[visible.length - 1];
+  const runActive = Boolean(lastEvent) && !FINISHED_TYPES.has(lastEvent.type);
+
   return (
     <div className="trace-list" role="log" aria-live="polite" aria-label="Agent activity">
       {visible.map(event => {
         const item = content(event);
-        const Icon = item.icon;
+        const active = event.event_id === lastEvent?.event_id && runActive;
+        const running = active && event.type === 'tool_started';
+        const Icon = running ? Loader2 : item.icon;
         return (
-          <article className={`trace-item trace-${event.type}`} key={event.event_id}>
-            <span className="trace-icon"><Icon size={16} aria-hidden="true" /></span>
+          <article className={`trace-item trace-${event.type}${active ? ' trace-active' : ''}`} key={event.event_id}>
+            <span className="trace-icon"><Icon size={16} className={running ? 'spin' : undefined} aria-hidden="true" /></span>
             <div>
               <div className="trace-title"><strong>{item.title}</strong><small>#{event.sequence}</small></div>
               {item.body && <p>{item.body}</p>}

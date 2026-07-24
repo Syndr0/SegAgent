@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -12,10 +12,27 @@ def utc_now() -> datetime:
 
 
 class Intent(str, Enum):
-    SEGMENT = "segment"
+    ORGAN = "organ"
+    OAR = "oar"
+    GTV = "gtv"
     QC = "qc"
     PROTOCOL = "protocol"
     QUESTION = "question"
+
+
+class TargetType(str, Enum):
+    ORGAN = "organ"
+    OAR = "oar"
+    GTV = "gtv"
+    CONTOUR = "contour"
+    UNKNOWN = "unknown"
+
+
+class EvidenceStatus(str, Enum):
+    PROPOSED = "proposed"
+    ADMITTED = "admitted"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"
 
 
 class PlannerAction(str, Enum):
@@ -30,6 +47,7 @@ class ApprovalKind(str, Enum):
     APPROVE = "approve"
     REJECT = "reject"
     FEEDBACK = "feedback"
+    MODIFY = "modify"
 
 
 class ArtifactRef(BaseModel):
@@ -76,6 +94,7 @@ class SegmentRequest(BaseModel):
     case_id: str
     structures: list[str] = Field(min_length=1, max_length=64)
     purpose: str = "answer the user's question"
+    target_type: "TargetType" = TargetType.UNKNOWN
 
     @field_validator("structures")
     @classmethod
@@ -84,8 +103,10 @@ class SegmentRequest(BaseModel):
         seen: set[str] = set()
         for item in value:
             normalized = " ".join(item.strip().split())
-            if not normalized or len(normalized) > 160:
-                raise ValueError("each structure must be a non-empty name <= 160 chars")
+            # 400 chars: anatomical labels are short, but a GTV prompt may be a
+            # full clinical sentence, which is what VoxTell's fusion needs.
+            if not normalized or len(normalized) > 400:
+                raise ValueError("each structure/prompt must be a non-empty string <= 400 chars")
             key = normalized.casefold()
             if key not in seen:
                 seen.add(key)
@@ -177,11 +198,14 @@ class PlannerDecision(BaseModel):
 class ApprovalDecision(BaseModel):
     decision: ApprovalKind
     feedback: str | None = Field(default=None, max_length=2000)
+    edited_mask_id: str | None = None
 
     @model_validator(mode="after")
-    def validate_feedback(self) -> "ApprovalDecision":
+    def validate_payload(self) -> "ApprovalDecision":
         if self.decision == ApprovalKind.FEEDBACK and not (self.feedback or "").strip():
             raise ValueError("feedback text is required when decision is feedback")
+        if self.decision == ApprovalKind.MODIFY and not (self.edited_mask_id or "").strip():
+            raise ValueError("edited_mask_id is required when decision is modify")
         return self
 
 
@@ -223,3 +247,47 @@ class AgentCardSkill(BaseModel):
     description: str
     tags: list[str]
     examples: list[str]
+
+
+class TaskIntent(BaseModel):
+    """Result of intent recognition: which task, and the material it needs."""
+
+    intent: Intent
+    confidence: float = Field(ge=0.0, le=1.0)
+    targets: list[str] = Field(default_factory=list)
+    site: str | None = None
+    source_description: str | None = None
+    rationale: str = ""
+
+
+class EvidenceRecord(BaseModel):
+    """A typed unit of evidence with an admission lifecycle.
+
+    Only ``admitted`` records may ground a final answer. ``values`` holds the
+    numeric quantities a tool actually emitted; the verifier grounds answer
+    numbers against these, never against a serialized data blob.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    record_id: str
+    tool: str
+    status: EvidenceStatus = EvidenceStatus.PROPOSED
+    summary: str = ""
+    target_type: TargetType = TargetType.UNKNOWN
+    model_name: str | None = None
+    model_version: str | None = None
+    values: dict[str, float] = Field(default_factory=dict)
+    citations: list[str] = Field(default_factory=list)
+    artifact_ids: list[str] = Field(default_factory=list)
+    derived_from: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class Claim(BaseModel):
+    """A single statement in a composed answer, bound to its evidence."""
+
+    text: str
+    kind: Literal["measurement", "protocol_reference", "qc_flag", "limitation"] = "measurement"
+    evidence_ids: list[str] = Field(default_factory=list)
