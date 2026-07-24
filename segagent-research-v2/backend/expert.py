@@ -54,10 +54,22 @@ class VoxTellBackend:
             return predictor
 
     def segment(self, image_path: Path, structures: list[str]) -> tuple[VolumeData, np.ndarray]:
+        # VoxTell was trained on images read by nnU-Net's NibabelIOWithReorient,
+        # which reorients to RAS AND transposes the spatial axes to (z, y, x).
+        # Reading with a plain as_closest_canonical (x, y, z) feeds the model
+        # axis-transposed data and produces poor masks, so use the same reader
+        # and transpose the result back to the (x, y, z) frame the rest of the
+        # pipeline (geometry, overlays, save_mask, QC) works in.
+        from nnunetv2.imageio.nibabel_reader_writer import NibabelIOWithReorient
+
         volume = load_volume(image_path)
+        predictor = self._ensure()
         with self._lock:
-            masks = self._ensure().predict_single_image(volume.data[None], structures)
+            image, _ = NibabelIOWithReorient().read_images([str(image_path)])
+            masks = predictor.predict_single_image(image, structures)
         array = np.asarray(masks, dtype=np.uint8)
+        if array.ndim == 4:
+            array = array.transpose(0, 3, 2, 1)  # (N, z, y, x) -> (N, x, y, z)
         if array.shape != (len(structures), *volume.data.shape):
             raise RuntimeError(f"unexpected VoxTell output shape: {array.shape}")
         return volume, array
