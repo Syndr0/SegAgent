@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from backend.schemas import EvidenceRecord, EvidenceStatus
+from backend.schemas import EvidenceRecord
 from backend.verifier import GroundingVerifier
 
 
 def seg_record(values: dict, citations=None, data=None) -> EvidenceRecord:
     return EvidenceRecord(
-        record_id="evidence_seg", tool="segment", status=EvidenceStatus.ADMITTED,
+        record_id="evidence_seg", tool="segment",
         values=values, citations=citations or [], data=data or {},
     )
 

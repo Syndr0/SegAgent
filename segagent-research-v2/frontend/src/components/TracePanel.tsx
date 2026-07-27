@@ -1,136 +1,192 @@
 import { useEffect, useRef } from 'react';
 import {
-  Activity,
   AlertTriangle,
+  BrainCircuit,
   CheckCircle2,
   Database,
-  GitBranch,
   Loader2,
   ScanLine,
-  ShieldCheck,
-  Wrench,
+  Search,
+  Sparkles,
+  Target,
   type LucideIcon,
 } from 'lucide-react';
-
-const FINISHED_TYPES = new Set(['run_completed', 'error', 'answer', 'approval_required']);
 import type { RunEvent } from '../types';
 
-const ACTIONS: Record<string, string> = {
-  lookup_protocol: 'Find protocol',
-  segment: 'Create masks',
-  run_qc: 'Check contours',
-  ask_user: 'Need more information',
-  final: 'Prepare result',
+// Events that mean the run is no longer thinking. Anything else at the tail of
+// the stream keeps the "Working…" indicator alive.
+const TERMINAL = new Set(['answer', 'run_completed', 'error']);
+
+const ACTION_LABELS: Record<string, string> = {
+  lookup_protocol: 'Looking up the protocol',
+  segment: 'Planning the segmentation',
+  ask_user: 'Needs more information',
+  final: 'Preparing the result',
 };
 
-const DECISIONS: Record<string, string> = {
-  approve: 'Approved',
-  feedback: 'Changes requested',
-  reject: 'Rejected',
+const TOOL_ICON: Record<string, LucideIcon> = {
+  lookup_protocol: Search,
+  segment: ScanLine,
 };
 
-interface Item {
-  title: string;
-  body?: string;
-  icon: LucideIcon;
+const TOOL_RUNNING: Record<string, string> = {
+  lookup_protocol: 'Searching the guideline library',
+  segment: 'Creating masks with VoxTell',
+};
+
+const INTENT_LABELS: Record<string, string> = {
+  organ: 'Organ',
+  oar: 'Organs at risk',
+  gtv: 'Tumor target',
+  protocol: 'Protocol',
+  question: 'Needs clarification',
+};
+
+interface IntentPayload {
+  intent?: string;
+  site?: string | null;
+  targets?: string[];
+  rationale?: string;
 }
 
-function content(event: RunEvent): Item {
-  switch (event.type) {
-    case 'run_started':
-      return { title: 'Run started', body: 'The agent is planning the next step.', icon: Activity };
-    case 'planner_decision': {
-      const confidence = typeof event.payload.confidence === 'number'
-        ? ` · ${Math.round(event.payload.confidence * 100)}% confidence`
-        : '';
-      return {
-        title: ACTIONS[event.payload.action || ''] || 'Plan',
-        body: `${event.payload.rationale_summary || 'Next step selected.'}${confidence}`,
-        icon: GitBranch,
-      };
-    }
-    case 'tool_started': {
-      const structures = event.payload.structures?.join(', ');
-      return {
-        title: ACTIONS[event.payload.tool || ''] || 'Working',
-        body: structures || event.payload.query || 'This tool step was used.',
-        icon: Wrench,
-      };
-    }
-    case 'observation':
-      return {
-        title: 'Step complete',
-        body: event.payload.observation?.summary || 'The result was saved.',
-        icon: Database,
-      };
-    case 'artifact':
-      return {
-        title: 'Mask ready',
-        body: event.payload.artifact?.label || 'A new result is ready in the viewer.',
-        icon: ScanLine,
-      };
-    case 'approval_required':
-      return {
-        title: 'Review needed',
-        body: 'Check the new masks before the run continues.',
-        icon: ShieldCheck,
-      };
-    case 'approval_recorded': {
-      const decision = event.payload.approval?.decision || '';
-      return {
-        title: 'Review saved',
-        body: DECISIONS[decision] || 'Your decision was recorded.',
-        icon: CheckCircle2,
-      };
-    }
-    case 'run_completed':
-      return { title: 'Done', body: 'The run is complete.', icon: CheckCircle2 };
-    case 'error':
-      return { title: 'Run failed', body: event.payload.message || 'Something went wrong.', icon: AlertTriangle };
-    default:
-      return { title: 'Activity', icon: Activity };
+interface Finding {
+  severity?: string;
+  message?: string;
+}
+
+function Turn({ event, active }: { event: RunEvent; active: boolean }) {
+  const { type, payload } = event;
+
+  if (type === 'run_started') {
+    const question = typeof payload.question === 'string' ? payload.question : '';
+    const intent = payload.intent as IntentPayload | undefined;
+    return (
+      <div className="chat-group">
+        {question && <div className="chat-user">{question}</div>}
+        {intent?.intent && (
+          <div className="chat-intent">
+            <span className="chat-intent-tag">{INTENT_LABELS[intent.intent] || intent.intent}</span>
+            {intent.site && <span className="chat-tag">{intent.site}</span>}
+            {(intent.targets || []).map(target => (
+              <span className="chat-tag" key={target}>{target}</span>
+            ))}
+            {intent.rationale && <small>{intent.rationale}</small>}
+          </div>
+        )}
+      </div>
+    );
   }
+
+  if (type === 'planner_decision') {
+    const action = typeof payload.action === 'string' ? payload.action : '';
+    const rationale = typeof payload.rationale_summary === 'string' ? payload.rationale_summary : '';
+    return (
+      <div className={`chat-step${active ? ' chat-step-active' : ''}`}>
+        <span className="chat-icon">{active ? <Loader2 className="spin" size={15} /> : <BrainCircuit size={15} />}</span>
+        <div className="chat-step-body">
+          <strong>{ACTION_LABELS[action] || 'Thinking'}</strong>
+          {rationale && <p className="chat-think">{rationale}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  if (type === 'tool_started') {
+    const tool = typeof payload.tool === 'string' ? payload.tool : '';
+    const Icon = TOOL_ICON[tool] || Database;
+    const structures = Array.isArray(payload.structures) ? (payload.structures as string[]).join(', ') : '';
+    const query = typeof payload.query === 'string' ? payload.query : '';
+    return (
+      <div className={`chat-step${active ? ' chat-step-active' : ''}`}>
+        <span className="chat-icon">{active ? <Loader2 className="spin" size={15} /> : <Icon size={15} />}</span>
+        <div className="chat-step-body">
+          <strong>{TOOL_RUNNING[tool] || 'Working'}</strong>
+          {(structures || query) && <p>{structures || query}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  if (type === 'observation') {
+    const observation = payload.observation as { summary?: string } | undefined;
+    const summary = observation?.summary || 'Step complete.';
+    return (
+      <div className="chat-note">
+        <span className="chat-icon-sm"><CheckCircle2 size={13} /></span>
+        <p>{summary}</p>
+      </div>
+    );
+  }
+
+  if (type === 'artifact') {
+    const artifact = payload.artifact as { label?: string } | undefined;
+    return (
+      <div className="chat-artifact">
+        <Target size={13} aria-hidden="true" />
+        <span>Mask ready · {artifact?.label || 'result'}</span>
+      </div>
+    );
+  }
+
+  if (type === 'answer') {
+    const text = typeof payload.text === 'string' ? payload.text : '';
+    const findings = (payload.critic_findings as Finding[] | undefined) || [];
+    return (
+      <div className="chat-answer">
+        <div className="chat-answer-head"><Sparkles size={14} aria-hidden="true" /> Result</div>
+        <p>{text}</p>
+        {findings.length > 0 && (
+          <ul className="chat-findings">
+            {findings.map((finding, index) => (
+              <li key={index} className={finding.severity === 'error' ? 'is-error' : 'is-warn'}>
+                {finding.message}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
+  if (type === 'error') {
+    return (
+      <div className="chat-error">
+        <AlertTriangle size={14} aria-hidden="true" />
+        <span>{typeof payload.message === 'string' ? payload.message : 'The run failed.'}</span>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 export default function TracePanel({ events }: { events: RunEvent[] }) {
   const endRef = useRef<HTMLDivElement>(null);
-  const visible = events.filter(event => event.type !== 'answer');
+  // run_completed carries no content; it only flips the "working" state off.
+  const visible = events.filter(event => event.type !== 'run_completed');
 
   useEffect(() => {
     const scroll = endRef.current?.closest<HTMLElement>('.trace-scroll');
     if (!scroll) return;
     const distanceFromBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
-    if (distanceFromBottom < 160) scroll.scrollTo({ top: scroll.scrollHeight });
+    if (distanceFromBottom < 200) scroll.scrollTo({ top: scroll.scrollHeight });
   }, [visible.length]);
 
   if (!visible.length) {
-    return <div className="trace-empty">Run steps will appear here.</div>;
+    return <div className="chat-empty">The agent's reasoning will appear here.</div>;
   }
 
-  const lastEvent = visible[visible.length - 1];
-  const runActive = Boolean(lastEvent) && !FINISHED_TYPES.has(lastEvent.type);
+  const last = events[events.length - 1];
+  const runActive = Boolean(last) && !TERMINAL.has(last.type);
 
   return (
-    <div className="trace-list" role="log" aria-live="polite" aria-label="Agent activity">
-      {visible.map(event => {
-        const item = content(event);
-        const active = event.event_id === lastEvent?.event_id && runActive;
-        const running = active && event.type === 'tool_started';
-        const Icon = running ? Loader2 : item.icon;
-        return (
-          <article className={`trace-item trace-${event.type}${active ? ' trace-active' : ''}`} key={event.event_id}>
-            <span className="trace-icon"><Icon size={16} className={running ? 'spin' : undefined} aria-hidden="true" /></span>
-            <div>
-              <div className="trace-title"><strong>{item.title}</strong><small>#{event.sequence}</small></div>
-              {item.body && <p>{item.body}</p>}
-              <details>
-                <summary>Details</summary>
-                <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-              </details>
-            </div>
-          </article>
-        );
-      })}
+    <div className="chat-thread" role="log" aria-live="polite" aria-label="Agent conversation">
+      {visible.map(event => (
+        <Turn key={event.event_id} event={event} active={runActive && event.event_id === last.event_id} />
+      ))}
+      {runActive && (
+        <div className="chat-typing"><Loader2 className="spin" size={14} aria-hidden="true" /> Working…</div>
+      )}
       <div ref={endRef} />
     </div>
   );

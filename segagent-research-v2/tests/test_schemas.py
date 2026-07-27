@@ -4,7 +4,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from backend.schemas import ApprovalDecision, PlannerAction, PlannerDecision, SegmentRequest
+from backend.schemas import PlannerAction, PlannerDecision, SegmentRequest
 
 
 class SchemaTests(unittest.TestCase):
@@ -23,11 +23,6 @@ class SchemaTests(unittest.TestCase):
                 rationale_summary="A target is required.",
                 confidence=0.9,
             )
-
-    def test_feedback_decision_requires_text(self) -> None:
-        with self.assertRaises(ValidationError):
-            ApprovalDecision(decision="feedback", feedback="  ")
-
 
 if __name__ == "__main__":
     unittest.main()

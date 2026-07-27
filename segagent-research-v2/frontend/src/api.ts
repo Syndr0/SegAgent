@@ -1,4 +1,4 @@
-import type { ApprovalRequest, ArtifactRef, CaseRecord, RunEvent, RunHistory } from './types';
+import type { ArtifactRef, CaseRecord, RunEvent, RunHistory } from './types';
 
 export const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
@@ -126,27 +126,6 @@ export async function startRun(
   return runId;
 }
 
-export async function resumeRun(
-  runId: string,
-  decision: 'approve' | 'reject' | 'feedback' | 'modify',
-  feedback: string,
-  onEvent: (event: RunEvent) => void,
-  signal?: AbortSignal,
-  editedMaskId?: string,
-): Promise<void> {
-  const response = await fetch(`${API}/api/runs/${runId}/resume`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      decision,
-      feedback: feedback || null,
-      edited_mask_id: editedMaskId || null,
-    }),
-    signal,
-  });
-  await readEventStream(response, onEvent);
-}
-
 export async function uploadEditedMask(
   caseId: string,
   structure: string,
@@ -183,8 +162,4 @@ export async function getRun(runId: string, signal?: AbortSignal): Promise<RunHi
   const response = await fetch(`${API}/api/runs/${runId}`, { signal });
   if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
-}
-
-export function approvalFromEvent(event: RunEvent): ApprovalRequest {
-  return event.payload as unknown as ApprovalRequest;
 }

@@ -9,15 +9,12 @@ from pathlib import Path
 import numpy as np
 
 from .expert import SegmentationBackend
-from .imaging import load_mask, load_volume, mask_geometry, render_overlays, save_mask
+from .imaging import mask_geometry, render_overlays, save_mask
 from .knowledge import HybridKnowledgeBase
-from .qc import ContourQCEngine
 from .schemas import (
     EvidenceRecord,
-    EvidenceStatus,
     Finding,
     ProtocolMatch,
-    QCReport,
     SegmentRequest,
     SegmentResult,
     StructureMeasurement,
@@ -186,84 +183,6 @@ class SegmentationTool:
         )
         return result, observation
 
-    def measure_edited(
-        self, case_id: str, edited_mask_id: str
-    ) -> tuple[StructureMeasurement, ToolObservation]:
-        """Re-measure a human-edited mask so it grounds like a segmentation.
-
-        The reviewer's edited contour supersedes the model's mask, so its volume
-        and intensity must be recomputed from the edited voxels — otherwise the
-        answer would cite the model's numbers for a contour the human changed.
-        """
-        case = self.store.get_case(case_id)
-        volume = load_volume(self.store.artifact_path(case.image))
-        ref, mask_path = self.store.get_artifact(case_id, edited_mask_id)
-        mask = load_mask(mask_path, volume)  # validates grid against the case image
-        voxels, bbox, centroid = mask_geometry(mask)
-        voxel_ml = float(np.prod(volume.spacing) / 1000.0)
-        if voxels == 0:
-            measurement = StructureMeasurement(structure=ref.label, found=False, voxels=0)
-            summary = f'{ref.label} (human-edited): empty contour.'
-        else:
-            measurement = StructureMeasurement(
-                structure=ref.label,
-                found=True,
-                voxels=voxels,
-                volume_ml=round(voxels * voxel_ml, 3),
-                mean_intensity=round(float(volume.data[mask].mean()), 3),
-                bbox_voxels=bbox,
-                centroid_voxels=centroid,
-                mask=ref,
-            )
-            summary = (
-                f'{ref.label} (human-edited): {measurement.voxels} voxels, '
-                f'{measurement.volume_ml} mL, mean intensity {measurement.mean_intensity}'
-            )
-        observation = ToolObservation(
-            observation_id=observation_id(),
-            tool="segment",
-            summary="Human-edited contour evidence:\n- " + summary,
-            data={
-                "segment_result": {"measurements": [measurement.model_dump(mode="json")]},
-                "edited": True,
-                "derived_from": ref.metadata.get("derived_from"),
-                "target_type": ref.metadata.get("target_type", "unknown"),
-            },
-            evidence_ids=[ref.artifact_id],
-        )
-        return measurement, observation
-
-
-class ContourQCTool:
-    name = "run_qc"
-
-    def __init__(self, engine: ContourQCEngine):
-        self.engine = engine
-
-    def run(self, case_id: str) -> tuple[QCReport, ToolObservation]:
-        report = self.engine.run(case_id)
-        lines = [
-            f"QC summary: {report.summary.get('ok', 0)} ok, "
-            f"{report.summary.get('warn', 0)} review, "
-            f"{report.summary.get('error', 0)} error."
-        ]
-        evidence_ids: list[str] = []
-        for row in report.organs:
-            details = "; ".join(item.message for item in row.findings) or "no flags"
-            lines.append(
-                f"{row.organ} [{row.status}], volume={row.volume_ml} mL, "
-                f"expert Dice={row.expert_dice}: {details}"
-            )
-            if row.expert_mask:
-                evidence_ids.append(row.expert_mask.artifact_id)
-        return report, ToolObservation(
-            observation_id=observation_id(),
-            tool="run_qc",
-            summary="\n".join(lines),
-            data={"qc_report": report.model_dump(mode="json")},
-            evidence_ids=evidence_ids,
-        )
-
 
 class EvidenceCritic:
     """Deterministic final-answer guard; it never invents replacement evidence.
@@ -289,7 +208,7 @@ class EvidenceCritic:
             for item in self._verifier.verify(answer, records)
         ]
         if self.CLINICAL_JUDGMENTS.search(answer):
-            has_reference = any(item.tool in {"lookup_protocol", "run_qc"} for item in observations)
+            has_reference = any(item.tool == "lookup_protocol" for item in observations)
             if not has_reference:
                 findings.append(
                     Finding(
@@ -308,7 +227,6 @@ class EvidenceCritic:
         return EvidenceRecord(
             record_id=observation.observation_id,
             tool=observation.tool,
-            status=EvidenceStatus.ADMITTED,
             summary=observation.summary,
             values=EvidenceCritic._values(observation),
             citations=EvidenceCritic._citations(observation),
@@ -334,17 +252,6 @@ class EvidenceCritic:
                     for axis, coordinate in enumerate(item.get("centroid_voxels") or []):
                         if isinstance(coordinate, (int, float)):
                             values[f"seg{index}_centroid_{axis}"] = float(coordinate)
-            report = data.get("qc_report")
-            if isinstance(report, dict):
-                for index, organ in enumerate(report.get("organs", []) or []):
-                    for key in ("volume_ml", "expert_dice"):
-                        value = organ.get(key)
-                        if isinstance(value, (int, float)):
-                            values[f"qc{index}_{key}"] = float(value)
-                    for finding in organ.get("findings", []) or []:
-                        for name, value in (finding.get("metrics") or {}).items():
-                            if isinstance(value, (int, float)):
-                                values[f"qc{index}_{name}"] = float(value)
         except Exception:
             return values
         return values

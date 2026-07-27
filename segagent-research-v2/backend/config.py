@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     montage_slices: int = Field(default=6, ge=2, le=16)
     overlay_slices: int = Field(default=3, ge=1, le=8)
     max_new_tokens: int = Field(default=512, ge=64, le=4096)
-    require_mask_approval: bool = True
     retrieve_k: int = Field(default=4, ge=1, le=20)
     semantic_weight: float = Field(default=0.45, ge=0.0, le=1.0)
     trace_content: bool = False

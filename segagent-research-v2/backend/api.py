@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 
 from .a2a import router as a2a_router
 from .imaging import load_mask, load_volume
-from .schemas import ApprovalDecision
 from .service import get_services
 
 
@@ -158,11 +157,12 @@ def upload_edited_mask(
     derived_from: Annotated[str | None, Form()] = None,
     target_type: Annotated[str, Form()] = "unknown",
 ):
-    """Register a reviewer's edited contour after validating it against the case grid.
+    """Register a user's edited contour after validating it against the case grid.
 
-    The edited mask must sit on the same image grid as the case (NiiVue exports
-    on the background volume, so this holds by construction); a mismatch is
-    rejected rather than silently corrupting the evidence.
+    On-demand editing is decoupled from the run: the corrected contour is stored
+    as a new mask on the same image grid as the case (NiiVue exports on the
+    background volume, so this holds by construction); a grid mismatch is
+    rejected rather than silently corrupting the data.
     """
     name = file.filename or "edited.nii.gz"
     if not name.lower().endswith((".nii", ".nii.gz")):
@@ -213,15 +213,6 @@ def start_run(case_id: str, request: RunRequest):
     response.headers["X-Run-Id"] = run_id
     response.headers["Cache-Control"] = "no-store"
     return response
-
-
-@app.post("/api/runs/{run_id}/resume")
-def resume_run(run_id: str, decision: ApprovalDecision):
-    try:
-        stream = get_services().workflow.resume(run_id, decision)
-    except (ValueError, FileNotFoundError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return StreamingResponse(ndjson(stream), media_type="application/x-ndjson")
 
 
 @app.get("/api/runs/{run_id}")

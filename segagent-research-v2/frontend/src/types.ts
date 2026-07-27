@@ -58,13 +58,6 @@ export interface ViewerMask extends ArtifactRef {
   swatch: string;
 }
 
-export interface ApprovalRequest {
-  message: string;
-  summary: string;
-  artifacts: ArtifactRef[];
-  allowed_decisions: Array<'approve' | 'reject' | 'feedback' | 'modify'>;
-}
-
 export interface RunRecord {
   run_id: string;
   case_id: string;

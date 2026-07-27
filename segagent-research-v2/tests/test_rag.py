@@ -6,8 +6,6 @@ from pathlib import Path
 
 from backend.knowledge import HybridKnowledgeBase
 
-KNOWLEDGE_ROOT = Path(__file__).resolve().parents[1] / "knowledge"
-
 
 class RagRetrievalTests(unittest.TestCase):
     def test_front_matter_is_parsed(self) -> None:
@@ -32,12 +30,6 @@ class RagRetrievalTests(unittest.TestCase):
             self.assertTrue(all(c["source"].casefold() != "readme.md" for c in chunks))
             self.assertTrue(all(c["citation"] == "[Test Atlas v1]" for c in chunks))
             self.assertTrue(any(c["section"] == "Parotid gland" for c in chunks))
-
-    def test_entity_keyed_retrieval_returns_per_structure(self) -> None:
-        knowledge = HybridKnowledgeBase(KNOWLEDGE_ROOT)
-        result = knowledge.retrieve_for_structures(["left parotid gland", "spinal cord"])
-        self.assertEqual(set(result), {"left parotid gland", "spinal cord"})
-        self.assertIsInstance(result["spinal cord"], list)
 
 
 if __name__ == "__main__":

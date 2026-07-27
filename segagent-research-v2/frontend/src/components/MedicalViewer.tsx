@@ -13,6 +13,10 @@ interface Props {
 
 type ViewerState = 'empty' | 'loading' | 'ready' | 'error';
 
+// Stable identity so the mask-sync effect (which lists requiredMaskIds in its
+// deps) does not re-run every render when the prop is omitted.
+const NO_REQUIRED_MASKS: string[] = [];
+
 const VIEWS: Array<{ label: string; value: SLICE_TYPE }> = [
   { label: 'Axial', value: SLICE_TYPE.AXIAL },
   { label: 'Coronal', value: SLICE_TYPE.CORONAL },
@@ -23,7 +27,7 @@ const VIEWS: Array<{ label: string; value: SLICE_TYPE }> = [
 export default function MedicalViewer({
   imageUrl,
   masks,
-  requiredMaskIds = [],
+  requiredMaskIds = NO_REQUIRED_MASKS,
   onReadyChange,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -221,10 +225,9 @@ export default function MedicalViewer({
       )}
 
       {state === 'loading' && (
-        <div className="viewer-message" role="status">
-          <span><Loader2 className="spin" size={26} aria-hidden="true" /></span>
-          <strong>Loading scan…</strong>
-          <p>This can take a moment for large files.</p>
+        <div className="viewer-loading" role="status" aria-label="Loading scan">
+          <Loader2 className="spin" size={15} aria-hidden="true" />
+          <span>Loading scan…</span>
         </div>
       )}
 

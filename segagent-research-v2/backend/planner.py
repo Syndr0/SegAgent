@@ -17,7 +17,6 @@ needed or used.
 Available actions:
 - lookup_protocol: set site_query for OAR/treatment-site questions.
 - segment: set structures to real anatomical names.
-- run_qc: use only when uploaded contours should be audited.
 - ask_user: set user_message when the case/question is genuinely ambiguous.
 - final: set final_answer using only the supplied tool observations.
 
@@ -64,34 +63,6 @@ class RulePlanner:
         del case_id, step
         used = {item.tool for item in observations}
         lowered = normalize(question)
-        rejected = next(
-            (
-                item
-                for item in observations
-                if item.tool == "evidence_critic"
-                and item.data.get("approval", {}).get("decision") in {"reject", "feedback"}
-            ),
-            None,
-        )
-        if rejected is not None:
-            return PlannerDecision(
-                action=PlannerAction.ASK_USER,
-                rationale_summary="Human review did not approve the generated mask evidence.",
-                confidence=0.99,
-                user_message=(
-                    "The generated masks were not approved. Please revise the requested "
-                    "structures or provide reviewer guidance before another segmentation run."
-                ),
-            )
-        if any(term in lowered for term in ("quality control", "qc", "audit contour", "check contour")):
-            if "run_qc" not in used:
-                return PlannerDecision(
-                    action=PlannerAction.RUN_QC,
-                    rationale_summary="Uploaded contours require deterministic and expert-model review.",
-                    confidence=0.98,
-                )
-            return self._final_from_observations(observations)
-
         asks_protocol = any(
             term in lowered
             for term in ("oar", "organs at risk", "radiotherapy", "radiation plan", "contour all")

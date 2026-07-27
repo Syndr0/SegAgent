@@ -258,19 +258,3 @@ class HybridKnowledgeBase:
                 )
             )
         return hits
-
-    def retrieve_for_structures(
-        self, structures: list[str], k_each: int = 2
-    ) -> dict[str, list[RetrievalHit]]:
-        """Entity-keyed retrieval: guideline passages per named structure.
-
-        A precise, structure-scoped query retrieves far more reliably than one
-        query built from a vague sentence, so routing binds retrieval to the
-        structures the agent already knows.
-        """
-        results: dict[str, list[RetrievalHit]] = {}
-        for structure in structures:
-            name = " ".join(str(structure).strip().split())
-            if name and name not in results:
-                results[name] = self.retrieve_guidelines(name, k_each)
-        return results

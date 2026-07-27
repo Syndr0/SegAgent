@@ -20,7 +20,6 @@ PROFILES: dict[Intent, IntentProfile] = {
     Intent.ORGAN: IntentProfile("label", "none", "geometry", "review"),
     Intent.OAR: IntentProfile("label", "oar_protocol", "oar", "review"),
     Intent.GTV: IntentProfile("sentence", "target_guidelines", "target", "mandatory_edit"),
-    Intent.QC: IntentProfile("label", "oar_protocol", "oar", "review"),
     Intent.PROTOCOL: IntentProfile("label", "oar_protocol", "geometry", "review"),
     Intent.QUESTION: IntentProfile("label", "none", "geometry", "review"),
 }
@@ -39,9 +38,6 @@ OAR_TERMS = (
     "oar", "organs at risk", "organ at risk", "risk organ", "spare", "radiotherapy",
     "radiation plan", "contour all", "危及器官", "放疗", "危及",
 )
-QC_STRONG = ("qc", "quality control", "quality-control", "质控", "勾画检查", "审核")
-QC_VERBS = ("check", "audit", "review", "verify", "inspect", "核对")
-CONTOUR_NOUNS = ("contour", "contours", "勾画", "delineation", "segmentation")
 PROTOCOL_TERMS = (
     "protocol", "guideline", "which oar", "which structures", "what structures",
     "which organs", "指南", "协议", "规范",
@@ -55,7 +51,7 @@ def _has(text: str, terms: Iterable[str]) -> bool:
 class IntentClassifier:
     """Deterministic, abstaining intent recognition.
 
-    Distinguishes organ / OAR / GTV / QC / protocol, and returns QUESTION
+    Distinguishes organ / OAR / GTV / protocol, and returns QUESTION
     (abstain) when the request is ambiguous or under-specified — because
     misreading an OAR request as a tumor target, or vice versa, has real
     clinical consequences.
@@ -102,7 +98,6 @@ class IntentClassifier:
         self,
         question: str,
         *,
-        has_contours: bool = False,
         source_description: str | None = None,
     ) -> TaskIntent:
         text = " ".join(question.casefold().split())
@@ -112,19 +107,7 @@ class IntentClassifier:
 
         gtv = _has(text, GTV_TERMS) or has_report
         oar = _has(text, OAR_TERMS) or site is not None
-        qc = _has(text, QC_STRONG) or (_has(text, QC_VERBS) and _has(text, CONTOUR_NOUNS))
         protocol = _has(text, PROTOCOL_TERMS)
-
-        if qc:
-            if has_contours:
-                return TaskIntent(
-                    intent=Intent.QC, confidence=0.9, targets=organs, site=site,
-                    rationale="Explicit QC request with uploaded contours.",
-                )
-            return TaskIntent(
-                intent=Intent.QUESTION, confidence=0.4,
-                rationale="QC requested but no contours are uploaded to audit.",
-            )
 
         if gtv and oar and not protocol:
             if has_report:

@@ -3,18 +3,15 @@ from __future__ import annotations
 import operator
 import sqlite3
 import uuid
-from typing import Annotated, Any, Iterator, TypedDict
+from typing import Annotated, Iterator, TypedDict
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
 
 from .config import Settings
 from .observability import Tracing
 from .planner import Planner
 from .schemas import (
-    ApprovalDecision,
-    ApprovalKind,
     Intent,
     PlannerAction,
     PlannerDecision,
@@ -24,10 +21,10 @@ from .schemas import (
     ToolObservation,
 )
 from .guards import request_signature
-from .intent import IntentClassifier, profile_for
+from .intent import IntentClassifier
 from .prompts import build_prompts, target_type_for
 from .storage import ResearchStore
-from .tools import ContourQCTool, EvidenceCritic, ProtocolLookupTool, SegmentationTool
+from .tools import EvidenceCritic, ProtocolLookupTool, SegmentationTool
 
 
 class AgentState(TypedDict, total=False):
@@ -40,12 +37,9 @@ class AgentState(TypedDict, total=False):
     decisions: Annotated[list[dict], operator.add]
     events: Annotated[list[dict], operator.add]
     current_decision: dict
-    pending_review: dict | None
-    approval: dict | None
     final_answer: str | None
     critic_findings: list[dict]
     seen_signatures: Annotated[list[str], operator.add]
-    rejected_evidence: Annotated[list[str], operator.add]
 
 
 def event(event_type: str, **payload) -> dict:
@@ -59,7 +53,6 @@ class SegAgentGraph:
         planner: Planner,
         protocol_tool: ProtocolLookupTool,
         segmentation_tool: SegmentationTool,
-        qc_tool: ContourQCTool,
         critic: EvidenceCritic,
         tracing: Tracing | None = None,
     ):
@@ -67,7 +60,6 @@ class SegAgentGraph:
         self.planner = planner
         self.protocol_tool = protocol_tool
         self.segmentation_tool = segmentation_tool
-        self.qc_tool = qc_tool
         self.critic = critic
         self.tracing = tracing or Tracing()
         self._checkpoint_connection = sqlite3.connect(
@@ -81,23 +73,35 @@ class SegAgentGraph:
         return [ToolObservation.model_validate(item) for item in state.get("observations", [])]
 
     @staticmethod
-    def _intent_requires_review(state: AgentState) -> bool:
-        """Some intents (GTV) mandate human review of masks regardless of config."""
-        intent_value = (state.get("intent") or {}).get("intent")
-        if not intent_value:
-            return False
-        try:
-            return profile_for(Intent(intent_value)).trust == "mandatory_edit"
-        except (ValueError, KeyError):
-            return False
+    def _oar_site_gate(state: AgentState) -> PlannerDecision | None:
+        """Deterministic, pre-LLM gate for organs-at-risk requests.
+
+        An OAR request that names neither a treatment site nor explicit
+        structures must ask the user which site to contour, rather than letting
+        the planner guess an OAR list. This runs before the planner model.
+        """
+        intent_data = state.get("intent") or {}
+        if intent_data.get("intent") != Intent.OAR.value:
+            return None
+        if (intent_data.get("site") or "").strip():
+            return None
+        if intent_data.get("targets"):
+            return None
+        return PlannerDecision(
+            action=PlannerAction.ASK_USER,
+            rationale_summary="OAR request has no treatment site; asking before segmenting.",
+            confidence=1.0,
+            user_message=(
+                "Which treatment site's organs at risk should I contour? "
+                "For example: head and neck, thorax, abdomen, or pelvis."
+            ),
+        )
 
     def _build(self) -> StateGraph:
         graph = StateGraph(AgentState)
         graph.add_node("plan", self._plan)
         graph.add_node("lookup_protocol", self._lookup_protocol)
         graph.add_node("segment", self._segment)
-        graph.add_node("review", self._review)
-        graph.add_node("run_qc", self._run_qc)
         graph.add_node("finish", self._finish)
         graph.add_edge(START, "plan")
         graph.add_conditional_edges(
@@ -106,15 +110,12 @@ class SegAgentGraph:
             {
                 PlannerAction.LOOKUP_PROTOCOL.value: "lookup_protocol",
                 PlannerAction.SEGMENT.value: "segment",
-                PlannerAction.RUN_QC.value: "run_qc",
                 PlannerAction.ASK_USER.value: "finish",
                 PlannerAction.FINAL.value: "finish",
             },
         )
         graph.add_edge("lookup_protocol", "plan")
-        graph.add_edge("segment", "review")
-        graph.add_edge("review", "plan")
-        graph.add_edge("run_qc", "plan")
+        graph.add_edge("segment", "plan")
         graph.add_edge("finish", END)
         return graph
 
@@ -131,7 +132,10 @@ class SegAgentGraph:
                 "segagent.step": step,
             },
         ):
-            if step > self.settings.max_steps:
+            gate = self._oar_site_gate(state) if step == 1 else None
+            if gate is not None:
+                decision = gate
+            elif step > self.settings.max_steps:
                 decision = PlannerDecision(
                     action=PlannerAction.FINAL,
                     rationale_summary="The configured step budget was reached.",
@@ -155,7 +159,6 @@ class SegAgentGraph:
                     step=step,
                     action=decision.action.value,
                     rationale_summary=decision.rationale_summary,
-                    confidence=decision.confidence,
                     structures=decision.structures,
                     site_query=decision.site_query,
                 )
@@ -226,11 +229,12 @@ class SegAgentGraph:
                 "observations": [observation.model_dump(mode="json")],
                 "events": [event("observation", observation=observation.model_dump(mode="json"))],
             }
+        target_type = target_type_for(task_intent)
         request = SegmentRequest(
             case_id=state["case_id"],
             structures=prompts,
             purpose=state["question"],
-            target_type=target_type_for(task_intent),
+            target_type=target_type,
         )
         with self.tracing.span(
             "execute_tool",
@@ -242,111 +246,19 @@ class SegAgentGraph:
             },
         ):
             result, observation = self.segmentation_tool.run(request)
-        mask_artifacts = [
-            item.mask.model_dump(mode="json")
+        # Masks stream straight to the viewer as artifacts; there is no blocking
+        # review. The target_type rides on each artifact so the UI can flag
+        # tumor targets (GTV) as unvalidated and requiring clinician review.
+        artifact_events = [
+            event("artifact", artifact=item.mask.model_dump(mode="json"))
             for item in result.measurements
             if item.mask is not None
         ]
-        artifact_events = [event("artifact", artifact=item) for item in mask_artifacts]
-        pending = {
-            "tool": "segment",
-            "observation_id": observation.observation_id,
-            "evidence_ids": observation.evidence_ids,
-            "summary": observation.summary,
-            "artifacts": mask_artifacts,
-        }
         return {
             "observations": [observation.model_dump(mode="json")],
-            "pending_review": pending if mask_artifacts else None,
             "seen_signatures": [signature],
             "events": [
                 event("tool_started", tool="segment", structures=request.structures),
-                event("observation", observation=observation.model_dump(mode="json")),
-                *artifact_events,
-            ],
-        }
-
-    def _review(self, state: AgentState) -> dict:
-        pending = state.get("pending_review")
-        if not pending:
-            return {}
-        require_approval = (
-            self.settings.require_mask_approval or self._intent_requires_review(state)
-        )
-        if not require_approval:
-            approval = ApprovalDecision(decision=ApprovalKind.APPROVE)
-        else:
-            response = interrupt(
-                {
-                    "type": "approval_required",
-                    "case_id": state["case_id"],
-                    "run_id": state["run_id"],
-                    "message": "Review the generated masks before the agent continues.",
-                    **pending,
-                    "allowed_decisions": [item.value for item in ApprovalKind],
-                }
-            )
-            approval = ApprovalDecision.model_validate(response)
-        additions: list[dict] = []
-        rejected: list[str] = []
-        original_id = pending.get("observation_id")
-        if approval.decision == ApprovalKind.MODIFY and approval.edited_mask_id:
-            # Human edit supersedes the model mask: exclude the model's original
-            # measurements and admit the recomputed edited ones.
-            try:
-                _, edited = self.segmentation_tool.measure_edited(
-                    state["case_id"], approval.edited_mask_id
-                )
-                additions.append(edited.model_dump(mode="json"))
-            except Exception as exc:
-                note = ToolObservation(
-                    observation_id=f"observation_{uuid.uuid4().hex[:16]}",
-                    tool="evidence_critic",
-                    summary=f"The human-edited contour could not be measured: {exc}",
-                    data={"error": str(exc), "error_type": type(exc).__name__},
-                )
-                additions.append(note.model_dump(mode="json"))
-            if isinstance(original_id, str):
-                rejected.append(original_id)
-        elif approval.decision != ApprovalKind.APPROVE:
-            text = approval.feedback or "The reviewer did not approve the mask evidence."
-            observation = ToolObservation(
-                observation_id=f"observation_{uuid.uuid4().hex[:16]}",
-                tool="evidence_critic",
-                summary=f"Human review {approval.decision.value}: {text}",
-                data={"approval": approval.model_dump(mode="json")},
-                evidence_ids=list(pending.get("evidence_ids", [])),
-            )
-            additions.append(observation.model_dump(mode="json"))
-            if isinstance(original_id, str):
-                rejected.append(original_id)
-        return {
-            "approval": approval.model_dump(mode="json"),
-            "pending_review": None,
-            "observations": additions,
-            "rejected_evidence": rejected,
-            "events": [event("approval_recorded", approval=approval.model_dump(mode="json"))],
-        }
-
-    def _run_qc(self, state: AgentState) -> dict:
-        with self.tracing.span(
-            "execute_tool",
-            **{
-                "gen_ai.operation.name": "execute_tool",
-                "gen_ai.tool.name": "run_qc",
-                "segagent.case_id": state["case_id"],
-            },
-        ):
-            report, observation = self.qc_tool.run(state["case_id"])
-        artifact_events = [
-            event("artifact", artifact=row.expert_mask.model_dump(mode="json"))
-            for row in report.organs
-            if row.expert_mask is not None
-        ]
-        return {
-            "observations": [observation.model_dump(mode="json")],
-            "events": [
-                event("tool_started", tool="run_qc"),
                 event("observation", observation=observation.model_dump(mode="json")),
                 *artifact_events,
             ],
@@ -358,12 +270,7 @@ class SegAgentGraph:
             answer = decision.user_message or "Please provide more information."
         else:
             answer = decision.final_answer or "No final answer was produced."
-        rejected = set(state.get("rejected_evidence", []))
-        observations = [
-            item
-            for item in self._observations(state)
-            if item.observation_id not in rejected
-        ]
+        observations = self._observations(state)
         findings = self.critic.review(answer, observations)
         blocking = [item for item in findings if item.severity == "error"]
         if blocking:
@@ -387,7 +294,7 @@ class SegAgentGraph:
 
 
 class WorkflowService:
-    """Persists graph updates as typed events and exposes pause/resume streams."""
+    """Persists graph updates as typed events and streams them to the client."""
 
     def __init__(
         self,
@@ -408,10 +315,7 @@ class WorkflowService:
         intent_payload: dict = {}
         if self.intent_classifier is not None:
             try:
-                case = self.store.get_case(case_id)
-                task_intent = self.intent_classifier.classify(
-                    question, has_contours=bool(case.contours)
-                )
+                task_intent = self.intent_classifier.classify(question)
                 intent_payload = {"intent": task_intent.model_dump(mode="json")}
             except Exception:
                 intent_payload = {}
@@ -433,37 +337,16 @@ class WorkflowService:
                 "observations": [],
                 "decisions": [],
                 "events": [],
-                "pending_review": None,
             }
             yield from self._execute(run.run_id, initial)
 
         return run.run_id, stream()
 
-    def resume(self, run_id: str, decision: ApprovalDecision) -> Iterator[RunEvent]:
-        run = self.store.get_run(run_id)
-        if run.status != "waiting_approval":
-            raise ValueError("run is not waiting for approval")
-        run.status = "running"
-        self.store.save_run(run)
-        return self._execute(run_id, Command(resume=decision.model_dump(mode="json")))
-
-    def _execute(self, run_id: str, value: AgentState | Command) -> Iterator[RunEvent]:
+    def _execute(self, run_id: str, initial: AgentState) -> Iterator[RunEvent]:
         run = self.store.get_run(run_id)
         config = {"configurable": {"thread_id": run_id}}
         try:
-            for update in self.graph.graph.stream(value, config=config, stream_mode="updates"):
-                if "__interrupt__" in update:
-                    run = self.store.get_run(run_id)
-                    run.status = "waiting_approval"
-                    self.store.save_run(run)
-                    for item in update["__interrupt__"]:
-                        payload = getattr(item, "value", item)
-                        yield self._persist(
-                            run_id,
-                            run.case_id,
-                            event("approval_required", **dict(payload)),
-                        )
-                    return
+            for update in self.graph.graph.stream(initial, config=config, stream_mode="updates"):
                 for node_update in update.values():
                     if not isinstance(node_update, dict):
                         continue
@@ -496,4 +379,3 @@ class WorkflowService:
         )
         self.store.append_event(item)
         return item
-

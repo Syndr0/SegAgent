@@ -15,7 +15,6 @@ class Intent(str, Enum):
     ORGAN = "organ"
     OAR = "oar"
     GTV = "gtv"
-    QC = "qc"
     PROTOCOL = "protocol"
     QUESTION = "question"
 
@@ -28,26 +27,11 @@ class TargetType(str, Enum):
     UNKNOWN = "unknown"
 
 
-class EvidenceStatus(str, Enum):
-    PROPOSED = "proposed"
-    ADMITTED = "admitted"
-    REJECTED = "rejected"
-    SUPERSEDED = "superseded"
-
-
 class PlannerAction(str, Enum):
     LOOKUP_PROTOCOL = "lookup_protocol"
     SEGMENT = "segment"
-    RUN_QC = "run_qc"
     ASK_USER = "ask_user"
     FINAL = "final"
-
-
-class ApprovalKind(str, Enum):
-    APPROVE = "approve"
-    REJECT = "reject"
-    FEEDBACK = "feedback"
-    MODIFY = "modify"
 
 
 class ArtifactRef(BaseModel):
@@ -144,25 +128,9 @@ class Finding(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
-class QCOrganResult(BaseModel):
-    organ: str
-    status: Literal["ok", "warn", "error"]
-    volume_ml: float | None = None
-    expert_dice: float | None = None
-    findings: list[Finding] = Field(default_factory=list)
-    expert_mask: ArtifactRef | None = None
-
-
-class QCReport(BaseModel):
-    case_id: str
-    organs: list[QCOrganResult]
-    summary: dict[str, int]
-    warnings: list[str] = Field(default_factory=list)
-
-
 class ToolObservation(BaseModel):
     observation_id: str
-    tool: Literal["lookup_protocol", "segment", "run_qc", "evidence_critic"]
+    tool: Literal["lookup_protocol", "segment", "evidence_critic"]
     summary: str
     data: dict[str, Any]
     evidence_ids: list[str] = Field(default_factory=list)
@@ -192,20 +160,6 @@ class PlannerDecision(BaseModel):
             raise ValueError("ask_user decisions require user_message")
         if self.action == PlannerAction.FINAL and not self.final_answer:
             raise ValueError("final decisions require final_answer")
-        return self
-
-
-class ApprovalDecision(BaseModel):
-    decision: ApprovalKind
-    feedback: str | None = Field(default=None, max_length=2000)
-    edited_mask_id: str | None = None
-
-    @model_validator(mode="after")
-    def validate_payload(self) -> "ApprovalDecision":
-        if self.decision == ApprovalKind.FEEDBACK and not (self.feedback or "").strip():
-            raise ValueError("feedback text is required when decision is feedback")
-        if self.decision == ApprovalKind.MODIFY and not (self.edited_mask_id or "").strip():
-            raise ValueError("edited_mask_id is required when decision is modify")
         return self
 
 
@@ -261,18 +215,17 @@ class TaskIntent(BaseModel):
 
 
 class EvidenceRecord(BaseModel):
-    """A typed unit of evidence with an admission lifecycle.
+    """A typed unit of evidence used only to ground the final answer.
 
-    Only ``admitted`` records may ground a final answer. ``values`` holds the
-    numeric quantities a tool actually emitted; the verifier grounds answer
-    numbers against these, never against a serialized data blob.
+    ``values`` holds the numeric quantities a tool actually emitted; the
+    verifier grounds answer numbers against these (and citations against
+    ``citations``), never against a serialized data blob.
     """
 
     model_config = ConfigDict(protected_namespaces=())
 
     record_id: str
     tool: str
-    status: EvidenceStatus = EvidenceStatus.PROPOSED
     summary: str = ""
     target_type: TargetType = TargetType.UNKNOWN
     model_name: str | None = None
@@ -283,11 +236,3 @@ class EvidenceRecord(BaseModel):
     derived_from: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     data: dict[str, Any] = Field(default_factory=dict)
-
-
-class Claim(BaseModel):
-    """A single statement in a composed answer, bound to its evidence."""
-
-    text: str
-    kind: Literal["measurement", "protocol_reference", "qc_flag", "limitation"] = "measurement"
-    evidence_ids: list[str] = Field(default_factory=list)

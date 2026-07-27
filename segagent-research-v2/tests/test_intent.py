@@ -36,13 +36,14 @@ class IntentClassifierTests(unittest.TestCase):
         self.assertEqual(result.intent, Intent.GTV)
         self.assertEqual(result.source_description, sentence)
 
-    def test_qc_requires_contours_else_abstains(self) -> None:
-        self.assertEqual(
-            self.clf.classify("check these contours", has_contours=True).intent, Intent.QC
-        )
-        self.assertEqual(
-            self.clf.classify("check these contours", has_contours=False).intent, Intent.QUESTION
-        )
+    def test_oar_without_site_or_targets_abstains(self) -> None:
+        # A bare OAR request names neither a site nor structures; the classifier
+        # still returns OAR (the workflow's deterministic gate then asks the user
+        # which site to contour rather than guessing an OAR list).
+        result = self.clf.classify("find the OAR")
+        self.assertEqual(result.intent, Intent.OAR)
+        self.assertIsNone(result.site)
+        self.assertEqual(result.targets, [])
 
     def test_ambiguous_target_and_oar_abstains(self) -> None:
         result = self.clf.classify("segment the tumor and spare the parotid gland")
