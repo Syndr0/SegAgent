@@ -46,21 +46,58 @@ class AgentState(TypedDict, total=False):
     history: list[dict]
     intent: dict
     step: int
-    observations: Annotated[list[dict], operator.add]
-    decisions: Annotated[list[dict], operator.add]
+    observations: Annotated[list[dict], merge_turn_scoped]
+    decisions: Annotated[list[dict], merge_turn_scoped]
     events: Annotated[list[dict], operator.add]
     current_decision: dict
     final_answer: str | None
     critic_findings: list[dict]
-    seen_signatures: Annotated[list[str], operator.add]
+    seen_signatures: Annotated[list[str], merge_turn_scoped]
+    # How many times the planner re-requested work already done this turn.
+    duplicate_skips: int
     # Deterministic gates that already fired, so a gate cannot re-ask the same
     # question after the user replies and the step counter resets.
-    gates_fired: Annotated[list[str], operator.add]
+    gates_fired: Annotated[list[str], merge_turn_scoped]
     # What the user answered to those gated questions (confirmed site, tumor
     # description, whether a tumor contour was rejected).
     answers: dict
     # Whether the case has any contour to work from, for the report gate.
     has_contours: bool
+
+
+TURN_RESET = "__turn_reset__"
+
+
+def _is_reset(item) -> bool:
+    if isinstance(item, str):
+        return item == TURN_RESET
+    return isinstance(item, dict) and item.get(TURN_RESET) is True
+
+
+def merge_turn_scoped(left: list, right: list) -> list:
+    """Append updates, but a leading reset marker starts the list fresh.
+
+    The graph thread spans the whole conversation so state survives between
+    questions, which is what makes the dialogue work. These particular channels
+    must still be per-turn: otherwise a new question is planned against the
+    previous question's evidence, a duplicate-request guard refuses work the
+    user deliberately asked for again, and a gate that fired once never asks
+    again for a later question.
+    """
+    if right and _is_reset(right[0]):
+        return list(right[1:])
+    return [*left, *right]
+
+
+def new_turn() -> dict:
+    """State update that begins a fresh turn on an existing conversation thread."""
+    return {
+        "observations": [{TURN_RESET: True}],
+        "seen_signatures": [TURN_RESET],
+        "gates_fired": [TURN_RESET],
+        "decisions": [{TURN_RESET: True}],
+        "duplicate_skips": 0,
+    }
 
 
 def event(event_type: str, **payload) -> dict:
@@ -231,6 +268,21 @@ class SegAgentGraph:
             update.update(apply_reply(state, gate, text, self._organ_names))
         return update
 
+    @staticmethod
+    def _summarize(observations: list[ToolObservation]) -> str:
+        """Fall-back answer assembled only from what the tools actually reported."""
+        useful = [
+            item.summary
+            for item in observations
+            if item.summary and not item.data.get("skipped")
+        ]
+        if not useful:
+            return (
+                "I could not gather any new evidence for that. Could you rephrase "
+                "what you would like me to contour or measure?"
+            )
+        return "Here is what I have measured so far:\n\n" + "\n\n".join(useful)
+
     def _plan(self, state: AgentState) -> dict:
         step = int(state.get("step", 0)) + 1
         observations = self._observations(state)
@@ -246,7 +298,17 @@ class SegAgentGraph:
         ):
             stop = rejection_notice(state)
             gate = pre_plan_gate(state, self._organ_names, bool(state.get("has_contours")))
-            if stop is not None:
+            # A planner that keeps re-requesting work already done will otherwise
+            # burn the whole step budget and end with no answer, so answer from
+            # the evidence already gathered instead.
+            if int(state.get("duplicate_skips", 0)) >= 2:
+                decision = PlannerDecision(
+                    action=PlannerAction.FINAL,
+                    rationale_summary="The requested work was already done; answering from the existing evidence.",
+                    confidence=0.7,
+                    final_answer=self._summarize(observations),
+                )
+            elif stop is not None:
                 decision = PlannerDecision(
                     action=PlannerAction.FINAL,
                     rationale_summary="The user rejected the tumor contour; stopping instead of repeating it.",
@@ -260,10 +322,7 @@ class SegAgentGraph:
                     action=PlannerAction.FINAL,
                     rationale_summary="The configured step budget was reached.",
                     confidence=0.5,
-                    final_answer=(
-                        "The agent reached its step limit. Evidence collected so far:\n\n"
-                        + "\n\n".join(item.summary for item in observations)
-                    ),
+                    final_answer=self._summarize(observations),
                 )
             else:
                 decision = guard_decision(
@@ -360,6 +419,7 @@ class SegAgentGraph:
             )
             return {
                 "observations": [observation.model_dump(mode="json")],
+                "duplicate_skips": int(state.get("duplicate_skips", 0)) + 1,
                 "events": [event("observation", observation=observation.model_dump(mode="json"))],
             }
         target_type = target_type_for(task_intent)
@@ -484,8 +544,12 @@ class WorkflowService:
                     text, has_contours=has_uploaded
                 )
                 intent_payload = {"intent": task_intent.model_dump(mode="json")}
-            except Exception:
-                intent_payload = {}
+            except Exception as exc:
+                # A classifier failure silently disables every intent gate, so
+                # surface it in the trace instead of degrading without a trace.
+                intent_payload = {
+                    "intent_error": f"{type(exc).__name__}: {exc}",
+                }
 
         def stream() -> Iterator[RunEvent]:
             run.status = "running"
@@ -506,9 +570,8 @@ class WorkflowService:
                 "intent": intent_payload.get("intent", {}),
                 "has_contours": has_any_mask,
                 "step": 0,
-                "observations": [],
-                "decisions": [],
                 "events": [],
+                **new_turn(),
             }
             yield from self._execute(run.run_id, conversation.conversation_id, initial)
 

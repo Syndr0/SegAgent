@@ -29,7 +29,10 @@ class GroundingVerifier:
     """
 
     NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+)?")
-    CITATION = re.compile(r"\[[^\]\n]+\]")
+    # A citation must contain a letter: measurements are legitimately reported as
+    # bracketed arrays ("bbox [[240, 244, 81], ...]"), and treating those as
+    # fabricated sources blocked otherwise well-grounded answers.
+    CITATION = re.compile(r"\[[^\]\n]*[^\W\d_][^\]\n]*\]")
 
     def __init__(self, rel_tolerance: float = 5e-3):
         self.rel_tolerance = rel_tolerance

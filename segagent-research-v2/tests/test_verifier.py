@@ -61,6 +61,24 @@ class GroundingVerifierTests(unittest.TestCase):
         )
         self.assertEqual(findings, [])
 
+    def test_bracketed_measurements_are_not_treated_as_citations(self) -> None:
+        # Answers legitimately quote bbox arrays (the segment tool emits each
+        # coordinate as a value); those brackets must not read as sources.
+        rec = seg_record({
+            "volume_ml": 26.606,
+            "bbox0_0": 240.0, "bbox0_1": 244.0, "bbox0_2": 81.0,
+            "bbox1_0": 271.0, "bbox1_1": 268.0, "bbox1_2": 100.0,
+        })
+        findings = self.verifier.verify(
+            "The brainstem is 26.606 mL with bbox [[240, 244, 81], [271, 268, 100]].",
+            [rec],
+        )
+        self.assertEqual([f.check for f in findings], [])
+
+    def test_real_citation_is_still_checked(self) -> None:
+        rec = seg_record({"volume_ml": 26.606})
+        findings = self.verifier.verify("Per [RTOG 1016] this is fine.", [rec])
+        self.assertTrue(any(f.check == "citation_grounding" for f in findings))
 
 if __name__ == "__main__":
     unittest.main()

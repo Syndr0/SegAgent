@@ -62,6 +62,9 @@ class ProtocolLookupTool:
                 "protocol": protocol.model_dump(mode="json"),
                 "site": protocol.site,
                 "oars": protocol.oars,
+                # Record the citation actually shown in the summary, including
+                # the registry fallback, so quoting it back is grounded.
+                "citations": list(dict.fromkeys([*citations, citation_text])),
                 "guideline_hits": [item.model_dump(mode="json") for item in passages],
             }
         return protocol, ToolObservation(
@@ -424,6 +427,7 @@ class EvidenceCritic:
         citations: list[str] = []
         try:
             data = observation.data or {}
+            citations.extend(str(c) for c in data.get("citations", []) or [])
             protocol = data.get("protocol")
             if isinstance(protocol, dict):
                 citations.extend(str(c) for c in protocol.get("citations", []) or [])

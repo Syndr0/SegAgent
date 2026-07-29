@@ -104,6 +104,7 @@ class IntentClassifier:
         self,
         question: str,
         *,
+        has_contours: bool = False,
         source_description: str | None = None,
     ) -> TaskIntent:
         text = " ".join(question.casefold().split())
