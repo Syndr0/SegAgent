@@ -55,7 +55,7 @@ export interface RunEvent {
 }
 
 export interface TaskIntent {
-  intent: 'organ' | 'oar' | 'gtv' | 'protocol' | 'question';
+  intent: 'organ' | 'oar' | 'gtv' | 'qc' | 'report' | 'protocol' | 'question';
   confidence: number;
   targets: string[];
   site?: string | null;

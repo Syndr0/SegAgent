@@ -15,6 +15,8 @@ class Intent(str, Enum):
     ORGAN = "organ"
     OAR = "oar"
     GTV = "gtv"
+    QC = "qc"
+    REPORT = "report"
     PROTOCOL = "protocol"
     QUESTION = "question"
 
@@ -31,6 +33,7 @@ class PlannerAction(str, Enum):
     LOOKUP_PROTOCOL = "lookup_protocol"
     SEGMENT = "segment"
     INSPECT_MASK = "inspect_mask"
+    RUN_QC = "run_qc"
     ASK_USER = "ask_user"
     FINAL = "final"
 
@@ -134,9 +137,56 @@ class Finding(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class QCComparison(BaseModel):
+    """An uploaded organ contour measured against an independent model contour."""
+
+    structure: str
+    dice: float | None = None
+    contour_volume_ml: float | None = None
+    model_volume_ml: float | None = None
+    volume_difference_pct: float | None = None
+    mean_surface_mm: float | None = None
+    hd95_mm: float | None = None
+    status: Literal["ok", "warn", "error"] = "ok"
+    note: str = ""
+
+
+class QCTargetNote(BaseModel):
+    """A target volume (GTV/CTV/PTV), described but never model-checked.
+
+    An independent segmentation model has no way to validate a clinical target,
+    so targets are taken as given and only described: where they sit and which
+    contoured structures they lie near.
+    """
+
+    structure: str
+    volume_ml: float | None = None
+    centroid_voxels: list[float] | None = None
+    near: list[str] = Field(default_factory=list)
+
+
+class QCCompleteness(BaseModel):
+    """Which protocol structures are present, as a set difference — not a judgement."""
+
+    site: str | None = None
+    expected: list[str] = Field(default_factory=list)
+    present: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+
+
+class QCReport(BaseModel):
+    case_id: str
+    comparisons: list[QCComparison] = Field(default_factory=list)
+    targets: list[QCTargetNote] = Field(default_factory=list)
+    completeness: QCCompleteness | None = None
+    summary: dict[str, int] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ToolObservation(BaseModel):
     observation_id: str
-    tool: Literal["lookup_protocol", "segment", "inspect_mask", "evidence_critic"]
+    tool: Literal["lookup_protocol", "segment", "inspect_mask", "run_qc", "evidence_critic"]
     summary: str
     data: dict[str, Any]
     evidence_ids: list[str] = Field(default_factory=list)

@@ -27,7 +27,13 @@ from .guards import request_signature
 from .intent import IntentClassifier
 from .prompts import build_prompts, target_type_for
 from .storage import ResearchStore
-from .tools import EvidenceCritic, MaskInspectionTool, ProtocolLookupTool, SegmentationTool
+from .tools import (
+    ContourQCTool,
+    EvidenceCritic,
+    MaskInspectionTool,
+    ProtocolLookupTool,
+    SegmentationTool,
+)
 
 
 class AgentState(TypedDict, total=False):
@@ -53,6 +59,8 @@ class AgentState(TypedDict, total=False):
     # What the user answered to those gated questions (confirmed site, tumor
     # description, whether a tumor contour was rejected).
     answers: dict
+    # Whether the case has any contour to work from, for the report gate.
+    has_contours: bool
 
 
 def event(event_type: str, **payload) -> dict:
@@ -69,7 +77,9 @@ class SegAgentGraph:
         critic: EvidenceCritic,
         tracing: Tracing | None = None,
         inspection_tool: MaskInspectionTool | None = None,
+        qc_tool: ContourQCTool | None = None,
     ):
+        self.qc_tool = qc_tool
         self.settings = settings
         self.planner = planner
         self.protocol_tool = protocol_tool
@@ -100,6 +110,7 @@ class SegAgentGraph:
         graph.add_node("lookup_protocol", self._lookup_protocol)
         graph.add_node("segment", self._segment)
         graph.add_node("inspect_mask", self._inspect_mask)
+        graph.add_node("run_qc", self._run_qc)
         graph.add_node("ask_user", self._ask_user)
         graph.add_node("finish", self._finish)
         graph.add_edge(START, "plan")
@@ -110,6 +121,7 @@ class SegAgentGraph:
                 PlannerAction.LOOKUP_PROTOCOL.value: "lookup_protocol",
                 PlannerAction.SEGMENT.value: "segment",
                 PlannerAction.INSPECT_MASK.value: "inspect_mask",
+                PlannerAction.RUN_QC.value: "run_qc",
                 PlannerAction.ASK_USER.value: "ask_user",
                 PlannerAction.FINAL.value: "finish",
             },
@@ -117,6 +129,7 @@ class SegAgentGraph:
         graph.add_edge("lookup_protocol", "plan")
         graph.add_edge("segment", "plan")
         graph.add_edge("inspect_mask", "plan")
+        graph.add_edge("run_qc", "plan")
         # Asking is no longer terminal: the reply flows back into planning, so a
         # clarification can continue the same turn (tumor and OAR dialogues).
         graph.add_edge("ask_user", "plan")
@@ -150,6 +163,39 @@ class SegAgentGraph:
             "observations": [observation.model_dump(mode="json")],
             "events": [
                 event("tool_started", tool="inspect_mask", structures=decision.structures),
+                event("observation", observation=observation.model_dump(mode="json")),
+            ],
+        }
+
+    def _run_qc(self, state: AgentState) -> dict:
+        """Compare uploaded contours with an independent model contour."""
+        decision = PlannerDecision.model_validate(state["current_decision"])
+        if self.qc_tool is None:
+            observation = ToolObservation(
+                observation_id=f"observation_{uuid.uuid4().hex[:16]}",
+                tool="run_qc",
+                summary="Contour QC is not available in this deployment.",
+                data={"error": "no qc tool"},
+            )
+            return {
+                "observations": [observation.model_dump(mode="json")],
+                "events": [event("observation", observation=observation.model_dump(mode="json"))],
+            }
+        intent_data = state.get("intent") or {}
+        site = decision.site_query or intent_data.get("site") or None
+        with self.tracing.span(
+            "execute_tool",
+            **{
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": "run_qc",
+                "segagent.case_id": state["case_id"],
+            },
+        ):
+            _, observation = self.qc_tool.run(state["case_id"], site)
+        return {
+            "observations": [observation.model_dump(mode="json")],
+            "events": [
+                event("tool_started", tool="run_qc", query=site),
                 event("observation", observation=observation.model_dump(mode="json")),
             ],
         }
@@ -199,7 +245,7 @@ class SegAgentGraph:
             },
         ):
             stop = rejection_notice(state)
-            gate = pre_plan_gate(state, self._organ_names)
+            gate = pre_plan_gate(state, self._organ_names, bool(state.get("has_contours")))
             if stop is not None:
                 decision = PlannerDecision(
                     action=PlannerAction.FINAL,
@@ -420,11 +466,22 @@ class WorkflowService:
         ]
 
         intent_payload: dict = {}
+        # Uploaded contours drive QC; any contour or generated mask is enough to
+        # report on.
+        has_uploaded = False
+        has_any_mask = False
+        try:
+            case = self.store.get_case(case_id)
+            has_uploaded = bool(case.contours)
+            has_any_mask = any(
+                item.kind in {"contour", "mask"} for item in case.artifacts
+            )
+        except Exception:
+            pass
         if self.intent_classifier is not None:
             try:
-                case = self.store.get_case(case_id)
                 task_intent = self.intent_classifier.classify(
-                    text, has_contours=bool(case.contours)
+                    text, has_contours=has_uploaded
                 )
                 intent_payload = {"intent": task_intent.model_dump(mode="json")}
             except Exception:
@@ -447,6 +504,7 @@ class WorkflowService:
                 "question": text,
                 "history": history,
                 "intent": intent_payload.get("intent", {}),
+                "has_contours": has_any_mask,
                 "step": 0,
                 "observations": [],
                 "decisions": [],

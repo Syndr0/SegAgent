@@ -188,9 +188,36 @@ def oar_site_guard(state, decision: PlannerDecision) -> PlannerDecision | None:
     )
 
 
-def pre_plan_gate(state, organ_names=()) -> PlannerDecision | None:
+def report_scope_gate(state, has_contours: bool) -> PlannerDecision | None:
+    """A report with nothing contoured yet must offer to contour first.
+
+    Contouring a full OAR set takes minutes, so it is offered rather than
+    started silently just because a report was requested.
+    """
+    if _intent_of(state) != Intent.REPORT.value or _fired(state, "report_scope"):
+        return None
+    if has_contours:
+        return None
+    return PlannerDecision(
+        action=PlannerAction.ASK_USER,
+        rationale_summary="A report was requested but nothing is contoured yet.",
+        confidence=1.0,
+        user_message=(
+            "There are no contours on this case yet, so there is nothing to report on. "
+            "Shall I contour the organs at risk first (tell me the treatment site), or "
+            "would you rather name the structures you want included?"
+        ),
+        gate="report_scope",
+    )
+
+
+def pre_plan_gate(state, organ_names=(), has_contours: bool = False) -> PlannerDecision | None:
     """Deterministic question that must be asked before the model plans."""
-    return gtv_confirm_gate(state) or gtv_spatial_gate(state, organ_names)
+    return (
+        gtv_confirm_gate(state)
+        or gtv_spatial_gate(state, organ_names)
+        or report_scope_gate(state, has_contours)
+    )
 
 
 def guard_decision(state, decision: PlannerDecision) -> PlannerDecision:

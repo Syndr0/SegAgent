@@ -11,10 +11,12 @@ import numpy as np
 from .expert import SegmentationBackend
 from .imaging import mask_geometry, render_overlays, save_mask
 from .knowledge import HybridKnowledgeBase
+from .qc import ContourQCEngine
 from .schemas import (
     EvidenceRecord,
     Finding,
     ProtocolMatch,
+    QCReport,
     SegmentRequest,
     SegmentResult,
     StructureMeasurement,
@@ -281,6 +283,68 @@ class MaskInspectionTool:
             evidence_ids=evidence_ids,
         )
         return measurements, observation
+
+
+class ContourQCTool:
+    """Turn a QC report into an observation the planner can narrate.
+
+    The summary states measured disagreement and protocol set differences only;
+    it never asserts that a contour or a plan is wrong, because an anatomy model
+    is a second opinion rather than ground truth.
+    """
+
+    name = "run_qc"
+
+    def __init__(self, engine: ContourQCEngine):
+        self.engine = engine
+
+    def run(self, case_id: str, site_query: str | None = None) -> tuple[QCReport, ToolObservation]:
+        report = self.engine.run(case_id, site_query)
+        lines: list[str] = []
+        evidence_ids: list[str] = []
+
+        if report.comparisons:
+            lines.append(
+                f"Comparison with an independent model contour "
+                f"({report.summary.get('ok', 0)} close, {report.summary.get('warn', 0)} moderate, "
+                f"{report.summary.get('error', 0)} large disagreement):"
+            )
+            for item in report.comparisons:
+                lines.append(
+                    f"{item.structure} [{item.status}]: Dice={item.dice}, "
+                    f"contour={item.contour_volume_ml} mL, model={item.model_volume_ml} mL, "
+                    f"volume difference={item.volume_difference_pct}%, "
+                    f"mean surface={item.mean_surface_mm} mm, HD95={item.hd95_mm} mm. {item.note}"
+                )
+        if report.targets:
+            lines.append(
+                "Target volumes are taken as given (a model cannot validate a clinical target); "
+                "described only:"
+            )
+            for item in report.targets:
+                near = ", ".join(item.near) if item.near else "no contoured organs nearby"
+                lines.append(
+                    f"{item.structure}: {item.volume_ml} mL, centroid {item.centroid_voxels}, "
+                    f"closest contoured structures: {near}"
+                )
+        if report.completeness:
+            completeness = report.completeness
+            missing = ", ".join(completeness.missing) if completeness.missing else "none"
+            citation = " ".join(completeness.citations) or "[local protocol registry]"
+            lines.append(
+                f"Protocol structure list for {completeness.site}: "
+                f"structures with no contour in this case: {missing}. Source: {citation}"
+            )
+        for warning in report.warnings:
+            lines.append(f"Warning: {warning}")
+
+        return report, ToolObservation(
+            observation_id=observation_id(),
+            tool="run_qc",
+            summary="\n- ".join(["Contour QC evidence:", *lines]) if lines else "No QC evidence.",
+            data={"qc_report": report.model_dump(mode="json")},
+            evidence_ids=evidence_ids,
+        )
 
 
 class EvidenceCritic:

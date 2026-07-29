@@ -20,6 +20,8 @@ PROFILES: dict[Intent, IntentProfile] = {
     Intent.ORGAN: IntentProfile("label", "none", "geometry", "review"),
     Intent.OAR: IntentProfile("label", "oar_protocol", "oar", "review"),
     Intent.GTV: IntentProfile("sentence", "target_guidelines", "target", "mandatory_edit"),
+    Intent.QC: IntentProfile("label", "oar_protocol", "oar", "review"),
+    Intent.REPORT: IntentProfile("label", "oar_protocol", "geometry", "review"),
     Intent.PROTOCOL: IntentProfile("label", "oar_protocol", "geometry", "review"),
     Intent.QUESTION: IntentProfile("label", "none", "geometry", "review"),
 }
@@ -38,6 +40,10 @@ OAR_TERMS = (
     "oar", "organs at risk", "organ at risk", "risk organ", "spare", "radiotherapy",
     "radiation plan", "contour all", "危及器官", "放疗", "危及",
 )
+QC_STRONG = ("qc", "quality control", "quality-control", "质控", "勾画检查", "审核")
+QC_VERBS = ("check", "audit", "review", "verify", "inspect", "validate", "核对")
+CONTOUR_NOUNS = ("contour", "contours", "勾画", "delineation", "segmentation", "structures")
+REPORT_TERMS = ("report", "summary", "summarize", "summarise", "报告", "总结", "汇总")
 PROTOCOL_TERMS = (
     "protocol", "guideline", "which oar", "which structures", "what structures",
     "which organs", "指南", "协议", "规范",
@@ -108,6 +114,25 @@ class IntentClassifier:
         gtv = _has(text, GTV_TERMS) or has_report
         oar = _has(text, OAR_TERMS) or site is not None
         protocol = _has(text, PROTOCOL_TERMS)
+        qc = _has(text, QC_STRONG) or (_has(text, QC_VERBS) and _has(text, CONTOUR_NOUNS))
+        wants_report = _has(text, REPORT_TERMS)
+
+        if qc:
+            if has_contours:
+                return TaskIntent(
+                    intent=Intent.QC, confidence=0.9, targets=organs, site=site,
+                    rationale="Contour check requested and contours are uploaded.",
+                )
+            return TaskIntent(
+                intent=Intent.QUESTION, confidence=0.4,
+                rationale="A contour check was requested but no contours are uploaded.",
+            )
+
+        if wants_report and not gtv:
+            return TaskIntent(
+                intent=Intent.REPORT, confidence=0.8, targets=organs, site=site,
+                rationale="A summary report over the contoured structures was requested.",
+            )
 
         if gtv and oar and not protocol:
             if has_report:

@@ -17,6 +17,8 @@ import type { ChatMessage, RunEvent, TaskIntent } from '../types';
 const ACTIONS: Record<string, string> = {
   lookup_protocol: 'Looking up the protocol',
   segment: 'Contouring',
+  inspect_mask: 'Measuring existing contours',
+  run_qc: 'Checking contours',
   ask_user: 'Asking a question',
   final: 'Writing the answer',
 };
@@ -25,6 +27,8 @@ const INTENT_LABELS: Record<string, string> = {
   organ: 'Organ',
   oar: 'Organs at risk',
   gtv: 'Tumor target',
+  qc: 'Contour check',
+  report: 'Report',
   protocol: 'Protocol',
   question: 'Question',
 };

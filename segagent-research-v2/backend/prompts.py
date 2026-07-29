@@ -9,6 +9,7 @@ _TARGET_BY_INTENT = {
     Intent.ORGAN: TargetType.ORGAN,
     Intent.OAR: TargetType.OAR,
     Intent.GTV: TargetType.GTV,
+    Intent.QC: TargetType.CONTOUR,
 }
 
 

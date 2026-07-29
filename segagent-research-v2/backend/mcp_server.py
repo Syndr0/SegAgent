@@ -29,6 +29,13 @@ def segment_volume(case_id: str, structures: list[str], purpose: str) -> dict:
     return result.model_dump(mode="json")
 
 
+@mcp.tool()
+def run_contour_qc(case_id: str, site: str | None = None) -> dict:
+    """Check a case's uploaded contours; the model contour is a second opinion, not truth."""
+    report, _ = get_services().qc_tool.run(case_id, site)
+    return report.model_dump(mode="json")
+
+
 @mcp.resource("segagent://cases/{case_id}")
 def case_metadata(case_id: str) -> str:
     """Read de-identified case and artifact metadata without returning pixel data."""

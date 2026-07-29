@@ -8,8 +8,15 @@ from .intent import IntentClassifier
 from .knowledge import HybridKnowledgeBase
 from .observability import Tracing
 from .planner import QwenStructuredPlanner, RulePlanner
+from .qc import ContourQCEngine
 from .storage import ResearchStore
-from .tools import EvidenceCritic, MaskInspectionTool, ProtocolLookupTool, SegmentationTool
+from .tools import (
+    ContourQCTool,
+    EvidenceCritic,
+    MaskInspectionTool,
+    ProtocolLookupTool,
+    SegmentationTool,
+)
 from .workflow import SegAgentGraph, WorkflowService
 
 
@@ -39,6 +46,8 @@ class AppServices:
             self.store, self.expert, settings.overlay_slices
         )
         self.inspection_tool = MaskInspectionTool(self.store)
+        self.qc_engine = ContourQCEngine(self.store, self.expert, self.knowledge)
+        self.qc_tool = ContourQCTool(self.qc_engine)
         self.critic = EvidenceCritic()
         self.intent_classifier = IntentClassifier.from_knowledge(self.knowledge)
         self.graph = SegAgentGraph(
@@ -49,6 +58,7 @@ class AppServices:
             self.critic,
             Tracing(),
             self.inspection_tool,
+            self.qc_tool,
         )
         self.workflow = WorkflowService(self.store, self.graph, self.intent_classifier)
 
