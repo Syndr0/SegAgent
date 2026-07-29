@@ -22,6 +22,7 @@ from .schemas import (
     TaskIntent,
     ToolObservation,
 )
+from .dialogue import apply_reply, guard_decision, pre_plan_gate, rejection_notice
 from .guards import request_signature
 from .intent import IntentClassifier
 from .prompts import build_prompts, target_type_for
@@ -49,6 +50,9 @@ class AgentState(TypedDict, total=False):
     # Deterministic gates that already fired, so a gate cannot re-ask the same
     # question after the user replies and the step counter resets.
     gates_fired: Annotated[list[str], operator.add]
+    # What the user answered to those gated questions (confirmed site, tumor
+    # description, whether a tumor contour was rejected).
+    answers: dict
 
 
 def event(event_type: str, **payload) -> dict:
@@ -72,6 +76,13 @@ class SegAgentGraph:
         self.segmentation_tool = segmentation_tool
         self.inspection_tool = inspection_tool
         self.critic = critic
+        # Organ vocabulary, used to recognize when a tumor description names a
+        # neighbouring structure and is therefore spatially anchored.
+        self._organ_names = tuple(
+            organ
+            for protocol in getattr(protocol_tool.knowledge, "protocols", [])
+            for organ in protocol.get("oars", [])
+        )
         self.tracing = tracing or Tracing()
         self._checkpoint_connection = sqlite3.connect(
             str(settings.checkpoint_db), check_same_thread=False
@@ -82,34 +93,6 @@ class SegAgentGraph:
     @staticmethod
     def _observations(state: AgentState) -> list[ToolObservation]:
         return [ToolObservation.model_validate(item) for item in state.get("observations", [])]
-
-    @staticmethod
-    def _oar_site_gate(state: AgentState) -> PlannerDecision | None:
-        """Deterministic, pre-LLM gate for organs-at-risk requests.
-
-        An OAR request that names neither a treatment site nor explicit
-        structures must ask the user which site to contour, rather than letting
-        the planner guess an OAR list. This runs before the planner model.
-        """
-        intent_data = state.get("intent") or {}
-        if intent_data.get("intent") != Intent.OAR.value:
-            return None
-        if (intent_data.get("site") or "").strip():
-            return None
-        if intent_data.get("targets"):
-            return None
-        if "oar_site" in state.get("gates_fired", []):
-            return None
-        return PlannerDecision(
-            action=PlannerAction.ASK_USER,
-            rationale_summary="OAR request has no treatment site; asking before segmenting.",
-            confidence=1.0,
-            user_message=(
-                "Which treatment site's organs at risk should I contour? "
-                "For example: head and neck, thorax, abdomen, or pelvis."
-            ),
-            gate="oar_site",
-        )
 
     def _build(self) -> StateGraph:
         graph = StateGraph(AgentState)
@@ -190,7 +173,7 @@ class SegAgentGraph:
         )
         text = reply.get("text") if isinstance(reply, dict) else reply
         text = " ".join(str(text or "").strip().split())
-        return {
+        update = {
             "question": text or state.get("question", ""),
             # Reset the step budget: the dialogue advanced because a human
             # answered, so the loop guard should not count earlier steps.
@@ -198,6 +181,9 @@ class SegAgentGraph:
             "gates_fired": [gate] if gate else [],
             "events": [event("reply_recorded", text=text, question=question)],
         }
+        if gate:
+            update.update(apply_reply(state, gate, text, self._organ_names))
+        return update
 
     def _plan(self, state: AgentState) -> dict:
         step = int(state.get("step", 0)) + 1
@@ -212,8 +198,16 @@ class SegAgentGraph:
                 "segagent.step": step,
             },
         ):
-            gate = self._oar_site_gate(state) if step == 1 else None
-            if gate is not None:
+            stop = rejection_notice(state)
+            gate = pre_plan_gate(state, self._organ_names)
+            if stop is not None:
+                decision = PlannerDecision(
+                    action=PlannerAction.FINAL,
+                    rationale_summary="The user rejected the tumor contour; stopping instead of repeating it.",
+                    confidence=1.0,
+                    final_answer=stop,
+                )
+            elif gate is not None:
                 decision = gate
             elif step > self.settings.max_steps:
                 decision = PlannerDecision(
@@ -226,12 +220,15 @@ class SegAgentGraph:
                     ),
                 )
             else:
-                decision = self.planner.decide(
-                    state["case_id"],
-                    state["question"],
-                    step,
-                    observations,
-                    history=state.get("history", []),
+                decision = guard_decision(
+                    state,
+                    self.planner.decide(
+                        state["case_id"],
+                        state["question"],
+                        step,
+                        observations,
+                        history=state.get("history", []),
+                    ),
                 )
         events = []
         # The model's own reasoning is surfaced as its own step so the UI can

@@ -24,6 +24,18 @@ Available actions:
 - ask_user: set user_message when you need information only the user has.
 - final: set final_answer.
 
+Workflows:
+- Organs at risk without a stated treatment site: look at the image, propose the
+  most likely site, and use ask_user to confirm it ("This looks like a thorax
+  scan — shall I contour the thoracic OAR set?"). Do not contour before the user
+  agrees. Once a site is confirmed, use lookup_protocol and segment its list.
+- Tumor target: the prompt you pass to segment should be the user's spatial
+  description, not the bare word "tumor" — the description is what makes the
+  segmentation work. After the user confirms a first attempt is in the right
+  region, segment the neighbouring organs, then re-segment the target with a
+  prompt that states its position relative to those structures.
+- A structure the user simply names: segment it directly.
+
 Rules:
 - Never invent a measurement, protocol, citation, or completed tool call.
 - Numbers in final_answer must come from tool observations. If you have not
