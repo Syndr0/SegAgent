@@ -1,15 +1,22 @@
-import type { ArtifactRef, CaseRecord, RunEvent, RunHistory } from './types';
+import type {
+  ArtifactRef,
+  CaseRecord,
+  ConversationHistory,
+  RunEvent,
+  RunHistory,
+} from './types';
 
 export const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
 const RUN_EVENT_TYPES = new Set<RunEvent['type']>([
   'run_started',
   'planner_decision',
+  'thinking',
   'tool_started',
   'observation',
   'artifact',
-  'approval_required',
-  'approval_recorded',
+  'question_pending',
+  'reply_recorded',
   'answer',
   'error',
   'run_completed',
@@ -106,14 +113,16 @@ export async function readEventStream(
   if (buffer.trim()) onEvent(parseRunEvent(buffer));
 }
 
-export async function startRun(
+/** Send one conversational turn. The server decides whether this opens a new
+ *  turn or answers a question the agent is waiting on. */
+export async function sendMessage(
   caseId: string,
   question: string,
   onEvent: (event: RunEvent) => void,
   onRunId: (runId: string) => void,
   signal?: AbortSignal,
 ): Promise<string> {
-  const response = await fetch(`${API}/api/cases/${caseId}/runs`, {
+  const response = await fetch(`${API}/api/cases/${caseId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question }),
@@ -160,6 +169,15 @@ export async function getCase(caseId: string, signal?: AbortSignal): Promise<Cas
 
 export async function getRun(runId: string, signal?: AbortSignal): Promise<RunHistory> {
   const response = await fetch(`${API}/api/runs/${runId}`, { signal });
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response.json();
+}
+
+export async function getConversation(
+  caseId: string,
+  signal?: AbortSignal,
+): Promise<ConversationHistory> {
+  const response = await fetch(`${API}/api/cases/${caseId}/conversation`, { signal });
   if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
 }

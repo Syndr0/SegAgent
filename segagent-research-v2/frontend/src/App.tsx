@@ -12,7 +12,7 @@ import {
   MessageSquareText,
   Pencil,
   ScanLine,
-  Sparkles,
+  SendHorizonal,
   X,
 } from 'lucide-react';
 import {
@@ -20,14 +20,15 @@ import {
   caseImageUrl,
   createCase,
   getCase,
+  getConversation,
   getRun,
-  startRun,
+  sendMessage,
   uploadEditedMask,
 } from './api';
 import MedicalViewer from './components/MedicalViewer';
-import TracePanel from './components/TracePanel';
+import ChatThread from './components/ChatThread';
 import UploadField from './components/UploadField';
-import type { ArtifactRef, CaseRecord, RunEvent, ViewerMask } from './types';
+import type { ArtifactRef, CaseRecord, ChatMessage, RunEvent, ViewerMask } from './types';
 
 const SAVED_CASE = 'segagent.activeCaseId';
 const SAVED_RUN = 'segagent.activeRunId';
@@ -110,6 +111,8 @@ function targetTypeOf(mask: ViewerMask): string {
 export default function App() {
   const [caseRecord, setCaseRecord] = useState<CaseRecord | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [history, setHistory] = useState<ChatMessage[]>([]);
+  const [awaitingReply, setAwaitingReply] = useState(false);
   const [masks, setMasks] = useState<ViewerMask[]>([]);
   const [question, setQuestion] = useState('');
   const [runId, setRunId] = useState('');
@@ -133,13 +136,22 @@ export default function App() {
         setCaseRecord(restoredCase);
         setMasks(masksFromCase(restoredCase));
 
+        try {
+          const conversation = await getConversation(restoredCase.case_id, controller.signal);
+          setHistory(conversation.messages);
+          setAwaitingReply(Boolean(conversation.conversation.pending_run_id));
+        } catch (caught) {
+          if (isAbortError(caught)) throw caught;
+        }
+
         const savedRunId = readSaved(SAVED_RUN);
         if (savedRunId) {
           try {
-            const history = await getRun(savedRunId, controller.signal);
-            if (history.run.case_id === restoredCase.case_id) {
-              setRunId(history.run.run_id);
-              setEvents(history.events);
+            const past = await getRun(savedRunId, controller.signal);
+            if (past.run.case_id === restoredCase.case_id) {
+              setRunId(past.run.run_id);
+              setEvents(past.events);
+              setAwaitingReply(past.run.status === 'waiting_reply');
             } else {
               forget(SAVED_RUN);
             }
@@ -181,6 +193,8 @@ export default function App() {
       return [...previous, event];
     });
     if (event.type === 'artifact' && event.payload.artifact) addArtifact(event.payload.artifact);
+    if (event.type === 'question_pending') setAwaitingReply(true);
+    if (event.type === 'reply_recorded') setAwaitingReply(false);
     if (event.type === 'error') setError(event.payload.message || 'The run failed.');
   };
 
@@ -188,6 +202,8 @@ export default function App() {
     activeCaseId.current = created.case_id;
     setCaseRecord(created);
     setEvents([]);
+    setHistory([]);
+    setAwaitingReply(false);
     setRunId('');
     setQuestion('');
     setViewerReady(false);
@@ -261,26 +277,23 @@ export default function App() {
     }
   };
 
-  const run = async () => {
+  // One send action: the server continues a pending question or opens a new
+  // turn, so the composer behaves like an ordinary chat box.
+  const send = async () => {
     if (!caseRecord || !viewerReady || !question.trim() || busy !== 'idle') return;
     const expectedCaseId = caseRecord.case_id;
+    const text = question.trim();
     const controller = new AbortController();
     requestController.current = controller;
     setBusy('running');
-    setEvents([]);
-    setRunId('');
+    setQuestion('');
     setError('');
-    setNotice('Running…');
-    // Hide the previous run's generated masks; new ones stream in on top.
-    setMasks(previous => previous.map(mask => (
-      mask.kind === 'mask' ? { ...mask, visible: false } : mask
-    )));
-    forget(SAVED_RUN);
+    setNotice(awaitingReply ? 'Sending reply…' : 'Working…');
     const stream = { outcome: 'unknown' as StreamOutcome };
     try {
-      await startRun(
+      await sendMessage(
         expectedCaseId,
-        question.trim(),
+        text,
         event => {
           if (event.type === 'run_completed') stream.outcome = 'completed';
           if (event.type === 'error') stream.outcome = 'failed';
@@ -292,12 +305,13 @@ export default function App() {
         },
         controller.signal,
       );
-      if (stream.outcome === 'completed') setNotice('Run complete.');
+      if (stream.outcome === 'completed') setNotice('Done.');
       else if (stream.outcome === 'failed') setNotice('');
-      else setNotice('Run finished.');
+      else setNotice('');
     } catch (caught) {
       if (!isAbortError(caught)) {
         setNotice('');
+        setQuestion(text);  // keep the text so the message is not lost
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
@@ -353,10 +367,10 @@ export default function App() {
   };
 
   const onQuestionKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter runs; Shift+Enter inserts a newline.
+    // Enter sends; Shift+Enter inserts a newline.
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      void run();
+      void send();
     }
   };
 
@@ -513,30 +527,13 @@ export default function App() {
       </main>
 
       <aside className="agent-panel" aria-labelledby="agent-heading">
-        <h2 className="panel-heading" id="agent-heading"><MessageSquareText size={18} aria-hidden="true" /> Ask SegAgent</h2>
+        <h2 className="panel-heading" id="agent-heading">
+          <MessageSquareText size={18} aria-hidden="true" /> SegAgent
+          {busy === 'running' && <span className="pulse-dot" aria-label="Working" />}
+        </h2>
 
-        <div className="composer">
-          <label htmlFor="agent-question">What should the agent do?</label>
-          <textarea
-            id="agent-question"
-            value={question}
-            onChange={event => setQuestion(event.target.value)}
-            onKeyDown={onQuestionKeyDown}
-            disabled={!caseRecord || !viewerReady || locked}
-            placeholder={!caseRecord ? 'Upload a scan first' : !viewerReady ? 'Wait for the scan to load' : 'Example: Segment the liver'}
-          />
-          <div className="composer-footer">
-            <span>Enter to run · Shift+Enter for a new line</span>
-            <button
-              type="button"
-              className="primary run-button"
-              disabled={!caseRecord || !viewerReady || !question.trim() || locked}
-              onClick={run}
-            >
-              {busy === 'running' ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-              {busy === 'running' ? 'Running…' : 'Run'}
-            </button>
-          </div>
+        <div className="chat-scroll">
+          <ChatThread messages={history} events={events} busy={busy === 'running'} />
         </div>
 
         {error && (
@@ -547,15 +544,39 @@ export default function App() {
           </div>
         )}
 
-        <section className="trace-section" aria-labelledby="activity-heading">
-          <h2 className="trace-heading" id="activity-heading"><ActivityLabel /> Activity</h2>
-          <div className="trace-scroll"><TracePanel events={events} /></div>
-        </section>
+        <div className="composer">
+          <label className="visually-hidden" htmlFor="agent-question">Message SegAgent</label>
+          <textarea
+            id="agent-question"
+            rows={2}
+            value={question}
+            onChange={event => setQuestion(event.target.value)}
+            onKeyDown={onQuestionKeyDown}
+            disabled={!caseRecord || !viewerReady || locked}
+            placeholder={
+              !caseRecord
+                ? 'Upload a scan first'
+                : !viewerReady
+                  ? 'Wait for the scan to load'
+                  : awaitingReply
+                    ? 'Answer the question above…'
+                    : 'Ask SegAgent to contour something, or ask about the scan'
+            }
+          />
+          <div className="composer-footer">
+            <span>{awaitingReply ? 'Replying to SegAgent' : 'Enter to send · Shift+Enter for a new line'}</span>
+            <button
+              type="button"
+              className="primary run-button"
+              disabled={!caseRecord || !viewerReady || !question.trim() || locked}
+              onClick={send}
+              aria-label="Send message"
+            >
+              {busy === 'running' ? <Loader2 className="spin" size={17} /> : <SendHorizonal size={17} />}
+            </button>
+          </div>
+        </div>
       </aside>
     </div>
   );
-}
-
-function ActivityLabel() {
-  return <span className="pulse-dot" aria-hidden="true" />;
 }
