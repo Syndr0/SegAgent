@@ -26,7 +26,7 @@ from .guards import request_signature
 from .intent import IntentClassifier
 from .prompts import build_prompts, target_type_for
 from .storage import ResearchStore
-from .tools import EvidenceCritic, ProtocolLookupTool, SegmentationTool
+from .tools import EvidenceCritic, MaskInspectionTool, ProtocolLookupTool, SegmentationTool
 
 
 class AgentState(TypedDict, total=False):
@@ -64,11 +64,13 @@ class SegAgentGraph:
         segmentation_tool: SegmentationTool,
         critic: EvidenceCritic,
         tracing: Tracing | None = None,
+        inspection_tool: MaskInspectionTool | None = None,
     ):
         self.settings = settings
         self.planner = planner
         self.protocol_tool = protocol_tool
         self.segmentation_tool = segmentation_tool
+        self.inspection_tool = inspection_tool
         self.critic = critic
         self.tracing = tracing or Tracing()
         self._checkpoint_connection = sqlite3.connect(
@@ -114,6 +116,7 @@ class SegAgentGraph:
         graph.add_node("plan", self._plan)
         graph.add_node("lookup_protocol", self._lookup_protocol)
         graph.add_node("segment", self._segment)
+        graph.add_node("inspect_mask", self._inspect_mask)
         graph.add_node("ask_user", self._ask_user)
         graph.add_node("finish", self._finish)
         graph.add_edge(START, "plan")
@@ -123,17 +126,50 @@ class SegAgentGraph:
             {
                 PlannerAction.LOOKUP_PROTOCOL.value: "lookup_protocol",
                 PlannerAction.SEGMENT.value: "segment",
+                PlannerAction.INSPECT_MASK.value: "inspect_mask",
                 PlannerAction.ASK_USER.value: "ask_user",
                 PlannerAction.FINAL.value: "finish",
             },
         )
         graph.add_edge("lookup_protocol", "plan")
         graph.add_edge("segment", "plan")
+        graph.add_edge("inspect_mask", "plan")
         # Asking is no longer terminal: the reply flows back into planning, so a
         # clarification can continue the same turn (tumor and OAR dialogues).
         graph.add_edge("ask_user", "plan")
         graph.add_edge("finish", END)
         return graph
+
+    def _inspect_mask(self, state: AgentState) -> dict:
+        """Measure contours that already exist, instead of segmenting again."""
+        decision = PlannerDecision.model_validate(state["current_decision"])
+        if self.inspection_tool is None:
+            observation = ToolObservation(
+                observation_id=f"observation_{uuid.uuid4().hex[:16]}",
+                tool="inspect_mask",
+                summary="Mask inspection is not available in this deployment.",
+                data={"error": "no inspection tool"},
+            )
+            return {
+                "observations": [observation.model_dump(mode="json")],
+                "events": [event("observation", observation=observation.model_dump(mode="json"))],
+            }
+        with self.tracing.span(
+            "execute_tool",
+            **{
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": "inspect_mask",
+                "segagent.case_id": state["case_id"],
+            },
+        ):
+            _, observation = self.inspection_tool.run(state["case_id"], decision.structures)
+        return {
+            "observations": [observation.model_dump(mode="json")],
+            "events": [
+                event("tool_started", tool="inspect_mask", structures=decision.structures),
+                event("observation", observation=observation.model_dump(mode="json")),
+            ],
+        }
 
     def _ask_user(self, state: AgentState) -> dict:
         """Ask the user something and suspend until they reply.
@@ -197,20 +233,26 @@ class SegAgentGraph:
                     observations,
                     history=state.get("history", []),
                 )
+        events = []
+        # The model's own reasoning is surfaced as its own step so the UI can
+        # fold it; it is never treated as evidence.
+        if decision.thinking:
+            events.append(event("thinking", step=step, thinking=decision.thinking))
+        events.append(
+            event(
+                "planner_decision",
+                step=step,
+                action=decision.action.value,
+                rationale_summary=decision.rationale_summary,
+                structures=decision.structures,
+                site_query=decision.site_query,
+            )
+        )
         return {
             "step": step,
             "current_decision": decision.model_dump(mode="json"),
             "decisions": [decision.model_dump(mode="json")],
-            "events": [
-                event(
-                    "planner_decision",
-                    step=step,
-                    action=decision.action.value,
-                    rationale_summary=decision.rationale_summary,
-                    structures=decision.structures,
-                    site_query=decision.site_query,
-                )
-            ],
+            "events": events,
         }
 
     @staticmethod

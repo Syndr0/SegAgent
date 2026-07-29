@@ -184,6 +184,105 @@ class SegmentationTool:
         return result, observation
 
 
+class MaskInspectionTool:
+    """Recall an existing contour and re-measure it, instead of re-segmenting.
+
+    This is what lets a follow-up question ("how big is that left eye mask?")
+    use the contour already on screen: the numbers are recomputed from the
+    stored voxels, so they are real measurements rather than remembered text.
+    """
+
+    name = "inspect_mask"
+
+    def __init__(self, store: ResearchStore):
+        self.store = store
+
+    def _find(self, case, name: str):
+        wanted = " ".join(name.strip().split()).casefold()
+        if not wanted:
+            return None
+        candidates = [
+            item
+            for item in case.artifacts
+            if item.kind in {"mask", "contour"}
+        ]
+        # Prefer an exact id or label match, then the most recent partial match.
+        for item in reversed(candidates):
+            if item.artifact_id == name:
+                return item
+        for item in reversed(candidates):
+            if item.label.casefold() == wanted:
+                return item
+        for item in reversed(candidates):
+            if wanted in item.label.casefold() or item.label.casefold() in wanted:
+                return item
+        return None
+
+    def run(self, case_id: str, structures: list[str]) -> tuple[list[StructureMeasurement], ToolObservation]:
+        case = self.store.get_case(case_id)
+        volume = load_volume(self.store.artifact_path(case.image))
+        voxel_ml = float(np.prod(volume.spacing) / 1000.0)
+        measurements: list[StructureMeasurement] = []
+        lines: list[str] = []
+        evidence_ids: list[str] = []
+        missing: list[str] = []
+
+        for name in structures:
+            ref = self._find(case, name)
+            if ref is None:
+                missing.append(name)
+                lines.append(f'{name}: no contour with that name exists in this case')
+                continue
+            try:
+                mask = load_mask(self.store.artifact_path(ref), volume)
+            except Exception as exc:
+                lines.append(f"{ref.label}: could not be read ({exc})")
+                continue
+            voxels, bbox, centroid = mask_geometry(mask)
+            if voxels == 0:
+                measurements.append(
+                    StructureMeasurement(structure=ref.label, found=False, voxels=0)
+                )
+                lines.append(f"{ref.label}: empty contour (0 voxels)")
+                continue
+            measurement = StructureMeasurement(
+                structure=ref.label,
+                found=True,
+                voxels=voxels,
+                volume_ml=round(voxels * voxel_ml, 3),
+                mean_intensity=round(float(volume.data[mask].mean()), 3),
+                bbox_voxels=bbox,
+                centroid_voxels=centroid,
+                mask=ref,
+            )
+            measurements.append(measurement)
+            evidence_ids.append(ref.artifact_id)
+            source = ref.metadata.get("source_model") or (
+                "uploaded" if ref.kind == "contour" else "unknown"
+            )
+            lines.append(
+                f"{ref.label} [{source}]: {measurement.voxels} voxels, "
+                f"{measurement.volume_ml} mL, mean intensity {measurement.mean_intensity}, "
+                f"bbox {measurement.bbox_voxels}, centroid {measurement.centroid_voxels}"
+            )
+
+        summary = "Existing contour measurements:\n- " + "\n- ".join(lines or ["nothing to inspect"])
+        observation = ToolObservation(
+            observation_id=observation_id(),
+            tool="inspect_mask",
+            summary=summary,
+            data={
+                "segment_result": {
+                    "measurements": [item.model_dump(mode="json") for item in measurements]
+                },
+                "requested": list(structures),
+                "missing": missing,
+            },
+            evidence_ids=evidence_ids,
+        )
+        return measurements, observation
+
+
 class EvidenceCritic:
     """Deterministic final-answer guard; it never invents replacement evidence.
 

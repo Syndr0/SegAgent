@@ -26,7 +26,13 @@ class Settings(BaseSettings):
     knowledge_dir: Path = PROJECT_DIR / "knowledge"
     checkpoint_db: Path = PROJECT_DIR / ".research_data" / "checkpoints.sqlite"
     voxtell_model: Path | None = None
+    # Any vision-language checkpoint: the planner loads it through the Auto
+    # classes, in bf16 on GPU. Set SEGAGENT_LLM_MODEL to the exact model id you
+    # have pulled (a thinking-capable VL model is recommended).
     llm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+    # Ask the chat template for the model's thinking channel, shown in the UI as
+    # foldable reasoning. Ignored by templates that have no thinking switch.
+    enable_thinking: bool = True
     planner: Literal["qwen", "rule"] = "qwen"
     device: str = "auto"
     max_steps: int = Field(default=8, ge=2, le=24)

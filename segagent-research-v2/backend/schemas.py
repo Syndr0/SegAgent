@@ -30,6 +30,7 @@ class TargetType(str, Enum):
 class PlannerAction(str, Enum):
     LOOKUP_PROTOCOL = "lookup_protocol"
     SEGMENT = "segment"
+    INSPECT_MASK = "inspect_mask"
     ASK_USER = "ask_user"
     FINAL = "final"
 
@@ -135,7 +136,7 @@ class Finding(BaseModel):
 
 class ToolObservation(BaseModel):
     observation_id: str
-    tool: Literal["lookup_protocol", "segment", "evidence_critic"]
+    tool: Literal["lookup_protocol", "segment", "inspect_mask", "evidence_critic"]
     summary: str
     data: dict[str, Any]
     evidence_ids: list[str] = Field(default_factory=list)
@@ -152,6 +153,9 @@ class PlannerDecision(BaseModel):
     # Set when a deterministic pre-model gate produced this decision, so the
     # gate is recorded as fired and cannot ask the same question twice.
     gate: str | None = None
+    # The model's own reasoning, captured from its thinking channel rather than
+    # requested inside the JSON. Displayed to the user; never used as evidence.
+    thinking: str | None = None
 
     @field_validator("structures")
     @classmethod
@@ -162,6 +166,8 @@ class PlannerDecision(BaseModel):
     def validate_action_payload(self) -> "PlannerDecision":
         if self.action == PlannerAction.SEGMENT and not self.structures:
             raise ValueError("segment decisions require at least one structure")
+        if self.action == PlannerAction.INSPECT_MASK and not self.structures:
+            raise ValueError("inspect_mask decisions require at least one structure")
         if self.action == PlannerAction.LOOKUP_PROTOCOL and not self.site_query:
             raise ValueError("lookup_protocol decisions require site_query")
         if self.action == PlannerAction.ASK_USER and not self.user_message:

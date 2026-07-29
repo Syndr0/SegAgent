@@ -104,12 +104,17 @@ class GroundingVerifier:
                 )
             )
 
-        if answer.strip() and not admitted:
+        # A purely descriptive answer (visual question answering) legitimately has
+        # no tool evidence, so only flag an evidence-free answer when it asserts
+        # specifics — numbers or citations — that ought to have come from a tool.
+        if answer.strip() and not admitted and (
+            self.NUMBER.search(answer) or self.CITATION.search(answer)
+        ):
             findings.append(
                 GroundingFinding(
                     check="evidence_presence",
                     severity="warn",
-                    message="The answer was produced without any admitted evidence.",
+                    message="The answer states specific values or sources but no tool evidence was recorded.",
                 )
             )
         return findings

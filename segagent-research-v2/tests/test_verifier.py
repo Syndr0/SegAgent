@@ -49,9 +49,17 @@ class GroundingVerifierTests(unittest.TestCase):
         bad = self.verifier.verify("Per [RTOG 9999] the value is 10.0.", [rec])
         self.assertTrue(any(f.check == "citation_grounding" for f in bad))
 
-    def test_no_evidence_warns(self) -> None:
-        findings = self.verifier.verify("Some answer without tools.", [])
+    def test_specific_claims_without_evidence_warn(self) -> None:
+        findings = self.verifier.verify("The volume is 42.0 mL.", [])
         self.assertTrue(any(f.check == "evidence_presence" for f in findings))
+
+    def test_descriptive_answer_without_evidence_is_allowed(self) -> None:
+        # Visual question answering has no tool evidence by design; a purely
+        # descriptive reply must not be flagged.
+        findings = self.verifier.verify(
+            "This is a chest CT; both lungs and the mediastinum are visible.", []
+        )
+        self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":
