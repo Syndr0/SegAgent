@@ -203,16 +203,37 @@ def upload_edited_mask(
     )
 
 
-@app.post("/api/cases/{case_id}/runs")
-def start_run(case_id: str, request: RunRequest):
+@app.post("/api/cases/{case_id}/messages")
+def send_message(case_id: str, request: RunRequest):
+    """Send one conversational turn.
+
+    If the agent is waiting on a question for this case, the text is treated as
+    the reply and continues that turn; otherwise a new turn starts.
+    """
     try:
-        run_id, stream = get_services().workflow.start(case_id, request.question)
+        run_id, stream = get_services().workflow.send(case_id, request.question)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     response = StreamingResponse(ndjson(stream), media_type="application/x-ndjson")
     response.headers["X-Run-Id"] = run_id
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.get("/api/cases/{case_id}/conversation")
+def get_conversation(case_id: str):
+    try:
+        services = get_services()
+        conversation = services.store.conversation_for_case(case_id)
+        return {
+            "conversation": conversation.model_dump(mode="json"),
+            "messages": [
+                item.model_dump(mode="json")
+                for item in services.store.messages(conversation.conversation_id)
+            ],
+        }
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail="Case not found") from exc
 
 
 @app.get("/api/runs/{run_id}")

@@ -7,11 +7,13 @@ from typing import Annotated, Iterator, TypedDict
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from .config import Settings
 from .observability import Tracing
 from .planner import Planner
 from .schemas import (
+    ChatRole,
     Intent,
     PlannerAction,
     PlannerDecision,
@@ -30,7 +32,11 @@ from .tools import EvidenceCritic, ProtocolLookupTool, SegmentationTool
 class AgentState(TypedDict, total=False):
     case_id: str
     run_id: str
+    conversation_id: str
     question: str
+    # Prior turns, refreshed from the store at the start of each turn so the
+    # planner can resolve references like "the mask you just made".
+    history: list[dict]
     intent: dict
     step: int
     observations: Annotated[list[dict], operator.add]
@@ -40,6 +46,9 @@ class AgentState(TypedDict, total=False):
     final_answer: str | None
     critic_findings: list[dict]
     seen_signatures: Annotated[list[str], operator.add]
+    # Deterministic gates that already fired, so a gate cannot re-ask the same
+    # question after the user replies and the step counter resets.
+    gates_fired: Annotated[list[str], operator.add]
 
 
 def event(event_type: str, **payload) -> dict:
@@ -87,6 +96,8 @@ class SegAgentGraph:
             return None
         if intent_data.get("targets"):
             return None
+        if "oar_site" in state.get("gates_fired", []):
+            return None
         return PlannerDecision(
             action=PlannerAction.ASK_USER,
             rationale_summary="OAR request has no treatment site; asking before segmenting.",
@@ -95,6 +106,7 @@ class SegAgentGraph:
                 "Which treatment site's organs at risk should I contour? "
                 "For example: head and neck, thorax, abdomen, or pelvis."
             ),
+            gate="oar_site",
         )
 
     def _build(self) -> StateGraph:
@@ -102,6 +114,7 @@ class SegAgentGraph:
         graph.add_node("plan", self._plan)
         graph.add_node("lookup_protocol", self._lookup_protocol)
         graph.add_node("segment", self._segment)
+        graph.add_node("ask_user", self._ask_user)
         graph.add_node("finish", self._finish)
         graph.add_edge(START, "plan")
         graph.add_conditional_edges(
@@ -110,14 +123,45 @@ class SegAgentGraph:
             {
                 PlannerAction.LOOKUP_PROTOCOL.value: "lookup_protocol",
                 PlannerAction.SEGMENT.value: "segment",
-                PlannerAction.ASK_USER.value: "finish",
+                PlannerAction.ASK_USER.value: "ask_user",
                 PlannerAction.FINAL.value: "finish",
             },
         )
         graph.add_edge("lookup_protocol", "plan")
         graph.add_edge("segment", "plan")
+        # Asking is no longer terminal: the reply flows back into planning, so a
+        # clarification can continue the same turn (tumor and OAR dialogues).
+        graph.add_edge("ask_user", "plan")
         graph.add_edge("finish", END)
         return graph
+
+    def _ask_user(self, state: AgentState) -> dict:
+        """Ask the user something and suspend until they reply.
+
+        The interrupt payload is surfaced by the service as a question_pending
+        event; resuming supplies the reply, which becomes the current question
+        so the planner continues with the new information.
+        """
+        decision = PlannerDecision.model_validate(state["current_decision"])
+        question = decision.user_message or "Could you clarify what you would like me to do?"
+        gate = decision.gate or ""
+        reply = interrupt(
+            {
+                "question": question,
+                "rationale_summary": decision.rationale_summary,
+                "gate": gate,
+            }
+        )
+        text = reply.get("text") if isinstance(reply, dict) else reply
+        text = " ".join(str(text or "").strip().split())
+        return {
+            "question": text or state.get("question", ""),
+            # Reset the step budget: the dialogue advanced because a human
+            # answered, so the loop guard should not count earlier steps.
+            "step": 0,
+            "gates_fired": [gate] if gate else [],
+            "events": [event("reply_recorded", text=text, question=question)],
+        }
 
     def _plan(self, state: AgentState) -> dict:
         step = int(state.get("step", 0)) + 1
@@ -147,7 +191,11 @@ class SegAgentGraph:
                 )
             else:
                 decision = self.planner.decide(
-                    state["case_id"], state["question"], step, observations
+                    state["case_id"],
+                    state["question"],
+                    step,
+                    observations,
+                    history=state.get("history", []),
                 )
         return {
             "step": step,
@@ -266,10 +314,7 @@ class SegAgentGraph:
 
     def _finish(self, state: AgentState) -> dict:
         decision = PlannerDecision.model_validate(state["current_decision"])
-        if decision.action == PlannerAction.ASK_USER:
-            answer = decision.user_message or "Please provide more information."
-        else:
-            answer = decision.final_answer or "No final answer was produced."
+        answer = decision.final_answer or "No final answer was produced."
         observations = self._observations(state)
         findings = self.critic.review(answer, observations)
         blocking = [item for item in findings if item.severity == "error"]
@@ -306,16 +351,42 @@ class WorkflowService:
         self.graph = graph
         self.intent_classifier = intent_classifier
 
-    def start(self, case_id: str, question: str) -> tuple[str, Iterator[RunEvent]]:
-        question = " ".join(question.strip().split())
-        if not question or len(question) > 4000:
-            raise ValueError("question must contain 1-4000 characters")
-        run = self.store.create_run(case_id, question)
+    def send(self, case_id: str, text: str) -> tuple[str, Iterator[RunEvent]]:
+        """Handle one user message.
+
+        If the agent is waiting on a question for this case, the message is the
+        reply and continues that turn; otherwise it opens a new turn. The client
+        therefore only ever needs one "send" action.
+        """
+        text = " ".join(text.strip().split())
+        if not text or len(text) > 4000:
+            raise ValueError("message must contain 1-4000 characters")
+        conversation = self.store.conversation_for_case(case_id)
+        if conversation.pending_run_id:
+            try:
+                return self.reply(conversation.pending_run_id, text)
+            except (ValueError, FileNotFoundError):
+                # The pending turn is gone or no longer waiting; start a new one.
+                conversation.pending_run_id = None
+                conversation.pending_question = None
+                self.store.save_conversation(conversation)
+
+        run = self.store.create_run(case_id, text, conversation.conversation_id)
+        self.store.append_message(
+            conversation.conversation_id, case_id, ChatRole.USER, text, run.run_id
+        )
+        history = [
+            item.model_dump(mode="json")
+            for item in self.store.messages(conversation.conversation_id)
+        ]
 
         intent_payload: dict = {}
         if self.intent_classifier is not None:
             try:
-                task_intent = self.intent_classifier.classify(question)
+                case = self.store.get_case(case_id)
+                task_intent = self.intent_classifier.classify(
+                    text, has_contours=bool(case.contours)
+                )
                 intent_payload = {"intent": task_intent.model_dump(mode="json")}
             except Exception:
                 intent_payload = {}
@@ -323,36 +394,86 @@ class WorkflowService:
         def stream() -> Iterator[RunEvent]:
             run.status = "running"
             self.store.save_run(run)
+            conversation.turn_count += 1
+            self.store.save_conversation(conversation)
             yield self._persist(
                 run.run_id,
                 case_id,
-                event("run_started", question=question, **intent_payload),
+                event("run_started", question=text, **intent_payload),
             )
             initial: AgentState = {
                 "case_id": case_id,
                 "run_id": run.run_id,
-                "question": question,
+                "conversation_id": conversation.conversation_id,
+                "question": text,
+                "history": history,
                 "intent": intent_payload.get("intent", {}),
                 "step": 0,
                 "observations": [],
                 "decisions": [],
                 "events": [],
             }
-            yield from self._execute(run.run_id, initial)
+            yield from self._execute(run.run_id, conversation.conversation_id, initial)
 
         return run.run_id, stream()
 
-    def _execute(self, run_id: str, initial: AgentState) -> Iterator[RunEvent]:
+    def reply(self, run_id: str, text: str) -> tuple[str, Iterator[RunEvent]]:
+        """Answer the agent's pending question and resume the same turn."""
+        text = " ".join(text.strip().split())
+        if not text or len(text) > 4000:
+            raise ValueError("reply must contain 1-4000 characters")
         run = self.store.get_run(run_id)
-        config = {"configurable": {"thread_id": run_id}}
+        if run.status != "waiting_reply":
+            raise ValueError("this turn is not waiting for a reply")
+        conversation_id = run.conversation_id or ""
+        if conversation_id:
+            self.store.append_message(
+                conversation_id, run.case_id, ChatRole.USER, text, run_id
+            )
+
+        def stream() -> Iterator[RunEvent]:
+            if conversation_id:
+                conversation = self.store.get_conversation(conversation_id)
+                conversation.pending_question = None
+                conversation.pending_run_id = None
+                self.store.save_conversation(conversation)
+            run.status = "running"
+            self.store.save_run(run)
+            yield from self._execute(
+                run_id, conversation_id, Command(resume={"text": text})
+            )
+
+        return run_id, stream()
+
+    def _execute(
+        self,
+        run_id: str,
+        conversation_id: str,
+        value: AgentState | Command,
+    ) -> Iterator[RunEvent]:
+        run = self.store.get_run(run_id)
+        # The thread is the conversation, not the turn, so evidence and dialogue
+        # state accumulate across every question asked about one patient.
+        config = {"configurable": {"thread_id": conversation_id or run_id}}
         try:
-            for update in self.graph.graph.stream(initial, config=config, stream_mode="updates"):
+            for update in self.graph.graph.stream(value, config=config, stream_mode="updates"):
+                if "__interrupt__" in update:
+                    yield from self._suspend(run_id, run.case_id, conversation_id, update)
+                    return
                 for node_update in update.values():
                     if not isinstance(node_update, dict):
                         continue
                     for raw in node_update.get("events", []):
                         persisted = self._persist(run_id, run.case_id, raw)
                         yield persisted
+                        if persisted.type == "answer" and conversation_id:
+                            self.store.append_message(
+                                conversation_id,
+                                run.case_id,
+                                ChatRole.AGENT,
+                                str(persisted.payload.get("text", "")),
+                                run_id,
+                            )
                         if persisted.type == "run_completed":
                             current = self.store.get_run(run_id)
                             current.status = "completed"
@@ -366,6 +487,31 @@ class WorkflowService:
                 current.case_id,
                 event("error", message=str(exc), error_type=type(exc).__name__),
             )
+
+    def _suspend(
+        self, run_id: str, case_id: str, conversation_id: str, update: dict
+    ) -> Iterator[RunEvent]:
+        """Record the agent's pending question and pause the turn."""
+        payload: dict = {}
+        for item in update["__interrupt__"]:
+            value = getattr(item, "value", item)
+            if isinstance(value, dict):
+                payload = value
+                break
+        question = str(payload.get("question") or "Could you clarify?")
+        current = self.store.get_run(run_id)
+        current.status = "waiting_reply"
+        self.store.save_run(current)
+        if conversation_id:
+            conversation = self.store.get_conversation(conversation_id)
+            conversation.pending_question = question
+            conversation.pending_run_id = run_id
+            self.store.save_conversation(conversation)
+            self.store.append_message(
+                conversation_id, case_id, ChatRole.AGENT, question, run_id,
+                metadata={"pending": True},
+            )
+        yield self._persist(run_id, case_id, event("question_pending", **payload))
 
     def _persist(self, run_id: str, case_id: str, raw: dict) -> RunEvent:
         run = self.store.get_run(run_id)

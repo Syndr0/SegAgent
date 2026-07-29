@@ -1,15 +1,14 @@
 请你评估我的建议，提出一个改动计划
 
-1. “find the OAR” with no body region can still make Qwen guess structures instead of asking which region. Add a deterministic gate: OAR without a confirmed site must ask the user before Qwen runs.
+1. LLM 右侧的对话界面参照一个典型的agent界面，UI设计类似codex，claude code，需要展示思考内容，类似对话形式，显示正在进行的步骤例如意图检测，待办事项，勾画等等，不要做成现在的一个一个板块冒出来, 对话框应该在底部，并且对于同一例患者，多轮对话应该能够有上下文。
+2. LLM能够正常对话，在未检测到意图时应该能进行视觉语言问答，模型应该具有调取已分割的mask的能力，例如用户提问：分割左眼，这轮对话完成后，用户继续针对分割后的图像提问，模型能调用左眼mask进行分析，模型应当具有chain of thought功能并显示思考内容
 
-2. 前端出现的Ask segagent下的liver示例不需要
-3. 前端视图界面的loading标识容易卡顿并且对视图有一定遮挡
-4. 对于生成的mask，agent调用segment model时直接在视图中显示，不再让user review mask，相关逻辑都删除
-5. enter键直接run，不要cmd+enter
-6. **Some important new architecture is not connected.**
-   `EvidenceLedger`, evidence statuses and typed `Claim` objects are good designs, but runtime execution still uses ordinary observations. The entity-keyed retrieval method is also only exercised by tests. These are currently foundations, not completed features.
+3. 对于生成的mask，agent调用segment model时直接在视图中显示，不再让user review mask
 
-7. 右侧的对话界面参照一个典型的agent界面，类似codex，claude code，展示思考过程，类似对话形式，有意图检测，plan待办事项，tool us等等的显示不要做成现在的一个一个板块冒出来。
-8. 删除qc功能，现有的qc功能没有实际作用
+4. QC功能：加载了已勾画的mask之后，在对话里检测到QC意图，于是调用voxtell勾画出相同标签的器官，做出对比，对话返回对比报告，特别的对于GTV，CTV等辅助结构，不要用voxtell对比，而是默认他们是正确的，并通过llm分析GTV所在的位置，评估已勾画的结构是否完全，是否有明显漏勾的结构。
+5. tumor勾画功能：检测到用户勾画tumor意图时，如果用户未提供空间形态信息，LLM对话询问用户提供tumor的大致位置，形态，空间提示，临近器官或子结构，若能提供，llm将用户输入的内容提供给voxtell分割，若不能提供，固定提示词为tumor并进行多轮交互，将mask给用户review，询问大致位置，所在器官是否正确，若用户认为正确，模型调用voxtell分割临近器官并分析生成出一个含有tumor空间信息和形态信息的完整提示词给voxtell分割，如果用户认为tumor勾画完全不正确，终止。
+6. OAR勾画功能：同样是多轮交互，如果用户未提供OAR区域，qwen首先根据图像自动判断区域并询问用户同意，纠正还是拒绝，确认区域后，调用KB知识一次性勾画所有器官。
+7. 一般器官勾画：用户内容直接给voxtell
+8. report功能：综合已勾画的结构给出报告，如果没有启用过OAR或者tumor功能，先调用这些功能，有充分的器官与tumor的位置形态体积，以及相互关系后再做出分析
 
-9. confidence是人工规定的没有意义
+7. 评估将模型升级为qwen3.5 9b还是qwen3.5 27b带thinking mode

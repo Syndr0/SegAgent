@@ -35,6 +35,7 @@ class Planner(Protocol):
         question: str,
         step: int,
         observations: list[ToolObservation],
+        history: list[dict] | None = None,
     ) -> PlannerDecision: ...
 
 
@@ -59,8 +60,9 @@ class RulePlanner:
         question: str,
         step: int,
         observations: list[ToolObservation],
+        history: list[dict] | None = None,
     ) -> PlannerDecision:
-        del case_id, step
+        del case_id, step, history
         used = {item.tool for item in observations}
         lowered = normalize(question)
         asks_protocol = any(
@@ -168,6 +170,7 @@ class QwenStructuredPlanner:
         question: str,
         step: int,
         observations: list[ToolObservation],
+        history: list[dict] | None = None,
     ) -> PlannerDecision:
         from .imaging import grounding_views, load_volume
 
@@ -179,6 +182,12 @@ class QwenStructuredPlanner:
         state = {
             "step": step,
             "question": question,
+            # Earlier turns for this patient, so references such as "the mask you
+            # just made" resolve instead of being re-segmented.
+            "conversation": [
+                {"role": item.get("role"), "text": item.get("text")}
+                for item in (history or [])[-12:]
+            ],
             "observations": [item.model_dump(mode="json") for item in observations],
             "required_schema": schema,
         }

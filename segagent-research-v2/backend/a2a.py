@@ -74,7 +74,7 @@ def a2a_rpc(request: JsonRpcRequest) -> dict:
             question = "\n".join(item for item in text_parts if item).strip()
             if not question:
                 return rpc_error(request.id, -32602, "a text message part is required")
-            run_id, stream = services.workflow.start(case_id, question)
+            run_id, stream = services.workflow.send(case_id, question)
             events = [item.model_dump(mode="json") for item in stream]
             run = services.store.get_run(run_id)
             state = "completed" if run.status == "completed" else "input-required"

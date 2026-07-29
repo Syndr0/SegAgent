@@ -34,6 +34,11 @@ class PlannerAction(str, Enum):
     FINAL = "final"
 
 
+class ChatRole(str, Enum):
+    USER = "user"
+    AGENT = "agent"
+
+
 class ArtifactRef(BaseModel):
     artifact_id: str
     case_id: str
@@ -144,6 +149,9 @@ class PlannerDecision(BaseModel):
     site_query: str | None = None
     user_message: str | None = None
     final_answer: str | None = None
+    # Set when a deterministic pre-model gate produced this decision, so the
+    # gate is recorded as fired and cannot ask the same question twice.
+    gate: str | None = None
 
     @field_validator("structures")
     @classmethod
@@ -171,11 +179,12 @@ class RunEvent(BaseModel):
     type: Literal[
         "run_started",
         "planner_decision",
+        "thinking",
         "tool_started",
         "observation",
         "artifact",
-        "approval_required",
-        "approval_recorded",
+        "question_pending",
+        "reply_recorded",
         "answer",
         "error",
         "run_completed",
@@ -185,14 +194,48 @@ class RunEvent(BaseModel):
 
 
 class RunRecord(BaseModel):
+    """One conversational turn: a user message and the work it triggered."""
+
     run_id: str
     case_id: str
     question: str
-    status: Literal["created", "running", "waiting_approval", "completed", "failed"]
+    status: Literal["created", "running", "waiting_reply", "completed", "failed"]
+    conversation_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     event_count: int = 0
     final_answer: str | None = None
+
+
+class ChatMessage(BaseModel):
+    """A durable conversation turn, independent of the run that produced it."""
+
+    message_id: str
+    conversation_id: str
+    case_id: str
+    role: ChatRole
+    text: str
+    run_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConversationRecord(BaseModel):
+    """Per-case dialogue state.
+
+    One conversation per case gives the agent context across turns, and its id
+    is the LangGraph thread id, so accumulated evidence (prior masks and
+    measurements) survives from one question to the next.
+    """
+
+    conversation_id: str
+    case_id: str
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    turn_count: int = 0
+    # Set while the agent has asked something and is waiting for the user.
+    pending_question: str | None = None
+    pending_run_id: str | None = None
 
 
 class AgentCardSkill(BaseModel):

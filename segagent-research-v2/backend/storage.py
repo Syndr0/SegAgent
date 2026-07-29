@@ -8,7 +8,16 @@ import uuid
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
-from .schemas import ArtifactRef, CaseRecord, RunEvent, RunRecord, utc_now
+from .schemas import (
+    ArtifactRef,
+    CaseRecord,
+    ChatMessage,
+    ChatRole,
+    ConversationRecord,
+    RunEvent,
+    RunRecord,
+    utc_now,
+)
 
 
 ID_RE = re.compile(r"^[a-z]+_[0-9a-f]{12,32}$")
@@ -43,8 +52,10 @@ class ResearchStore:
         self.root = Path(root)
         self.cases_dir = self.root / "cases"
         self.runs_dir = self.root / "runs"
+        self.conversations_dir = self.root / "conversations"
         self.cases_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.conversations_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
     @staticmethod
@@ -233,10 +244,90 @@ class ResearchStore:
                 path.unlink(missing_ok=True)
             raise
 
-    def create_run(self, case_id: str, question: str) -> RunRecord:
+    def conversation_path(self, conversation_id: str) -> Path:
+        self._validate_id(conversation_id, "conversation")
+        return self.conversations_dir / f"{conversation_id}.json"
+
+    def save_conversation(self, conversation: ConversationRecord) -> None:
+        conversation.updated_at = utc_now()
+        path = self.conversation_path(conversation.conversation_id)
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(conversation.model_dump_json(indent=2), encoding="utf-8")
+        temp.replace(path)
+
+    def get_conversation(self, conversation_id: str) -> ConversationRecord:
+        path = self.conversation_path(conversation_id)
+        if not path.exists():
+            raise FileNotFoundError("conversation not found")
+        return ConversationRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def conversation_for_case(self, case_id: str) -> ConversationRecord:
+        """Return the case's conversation, creating it on first use.
+
+        One conversation per case: the id doubles as the LangGraph thread id, so
+        every turn for a patient shares accumulated context.
+        """
+        self.get_case(case_id)
+        pointer = self.case_dir(case_id) / "conversation.txt"
+        with self._lock:
+            if pointer.exists():
+                conversation_id = pointer.read_text(encoding="utf-8").strip()
+                if conversation_id:
+                    try:
+                        return self.get_conversation(conversation_id)
+                    except (FileNotFoundError, ValueError):
+                        pass
+            conversation = ConversationRecord(
+                conversation_id=_id("conversation"), case_id=case_id
+            )
+            self.save_conversation(conversation)
+            pointer.write_text(conversation.conversation_id, encoding="utf-8")
+            return conversation
+
+    def append_message(
+        self,
+        conversation_id: str,
+        case_id: str,
+        role: ChatRole | str,
+        text: str,
+        run_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> ChatMessage:
+        message = ChatMessage(
+            message_id=_id("message"),
+            conversation_id=conversation_id,
+            case_id=case_id,
+            role=ChatRole(role),
+            text=text,
+            run_id=run_id,
+            metadata=metadata or {},
+        )
+        path = self.conversations_dir / f"{conversation_id}.messages.jsonl"
+        with self._lock, path.open("a", encoding="utf-8") as handle:
+            handle.write(message.model_dump_json() + "\n")
+        return message
+
+    def messages(self, conversation_id: str) -> list[ChatMessage]:
+        self._validate_id(conversation_id, "conversation")
+        path = self.conversations_dir / f"{conversation_id}.messages.jsonl"
+        if not path.exists():
+            return []
+        return [
+            ChatMessage.model_validate_json(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def create_run(
+        self, case_id: str, question: str, conversation_id: str | None = None
+    ) -> RunRecord:
         self.get_case(case_id)
         run = RunRecord(
-            run_id=_id("run"), case_id=case_id, question=question, status="created"
+            run_id=_id("run"),
+            case_id=case_id,
+            question=question,
+            status="created",
+            conversation_id=conversation_id,
         )
         self.save_run(run)
         return run
