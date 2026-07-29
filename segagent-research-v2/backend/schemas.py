@@ -34,6 +34,7 @@ class PlannerAction(str, Enum):
     SEGMENT = "segment"
     INSPECT_MASK = "inspect_mask"
     RUN_QC = "run_qc"
+    ANSWER_QUESTION = "answer_question"
     ASK_USER = "ask_user"
     FINAL = "final"
 

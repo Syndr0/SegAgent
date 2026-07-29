@@ -93,16 +93,24 @@ class GtvGateTests(unittest.TestCase):
     def test_confirm_gate_after_a_blind_attempt(self) -> None:
         state = gtv_state(
             gates_fired=["gtv_spatial"],
-            answers={"gtv_blind_attempt": True},
-            observations=[{"tool": "segment", "data": {}}],
+            answers={"gtv_blind_attempt": True, "gtv_first_mask": True},
         )
         gate = pre_plan_gate(state, ORGANS)
         self.assertIsNotNone(gate)
         self.assertEqual(gate.gate, "gtv_confirm")
 
     def test_no_confirm_gate_before_a_contour_exists(self) -> None:
+        # The blind attempt was requested but produced no mask yet.
         state = gtv_state(gates_fired=["gtv_spatial"], answers={"gtv_blind_attempt": True})
         self.assertIsNone(pre_plan_gate(state, ORGANS))
+
+    def test_no_confirm_gate_once_the_location_is_settled(self) -> None:
+        for settled in ("gtv_location_confirmed", "gtv_rejected"):
+            state = gtv_state(
+                gates_fired=["gtv_spatial"],
+                answers={"gtv_blind_attempt": True, "gtv_first_mask": True, settled: True},
+            )
+            self.assertIsNone(pre_plan_gate(state, ORGANS), settled)
 
     def test_rejection_stops_the_run_instead_of_repeating(self) -> None:
         state = gtv_state()

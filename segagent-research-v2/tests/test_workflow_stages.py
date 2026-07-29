@@ -1,0 +1,129 @@
+"""The workflow, not the model, decides what gets contoured at each stage.
+
+These cover the sequencing the spec calls for: a confirmed OAR request contours
+the protocol's whole list, and the tumor workflow walks blind attempt -> confirm
+-> neighbours -> enriched re-prompt in order.
+"""
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from backend.dialogue import build_tumor_prompt, forced_structures
+
+PROTOCOL = ["brainstem", "spinal cord", "left parotid gland", "larynx", "mandible"]
+
+
+def observation(*measurements: dict) -> dict:
+    return {
+        "tool": "segment",
+        "data": {"segment_result": {"measurements": list(measurements)}},
+    }
+
+
+def found(structure: str, centroid, volume_ml=10.0) -> dict:
+    return {
+        "structure": structure,
+        "found": True,
+        "volume_ml": volume_ml,
+        "centroid_voxels": centroid,
+    }
+
+
+class OarStageTests(unittest.TestCase):
+    def test_confirmed_oar_request_contours_the_whole_protocol_list(self) -> None:
+        state = {"intent": {"intent": "oar", "site": "head and neck"}, "answers": {}}
+        structures, _ = forced_structures(state, PROTOCOL, [])
+        self.assertEqual(structures, PROTOCOL)
+
+    def test_oar_list_is_not_contoured_twice(self) -> None:
+        state = {
+            "intent": {"intent": "oar", "site": "head and neck"},
+            "answers": {"oar_contoured": True},
+        }
+        self.assertIsNone(forced_structures(state, PROTOCOL, []))
+
+    def test_no_override_without_a_matched_protocol(self) -> None:
+        state = {"intent": {"intent": "oar"}, "answers": {}}
+        self.assertIsNone(forced_structures(state, [], []))
+
+
+class TumorStageTests(unittest.TestCase):
+    def test_blind_attempt_uses_the_fixed_prompt(self) -> None:
+        state = {"intent": {"intent": "gtv"}, "answers": {"gtv_blind_attempt": True}}
+        structures, _ = forced_structures(state, PROTOCOL, [])
+        self.assertEqual(structures, ["tumor"])
+
+    def test_after_confirmation_neighbouring_organs_are_contoured(self) -> None:
+        state = {
+            "intent": {"intent": "gtv"},
+            "answers": {"gtv_blind_attempt": True, "gtv_first_mask": True,
+                        "gtv_location_confirmed": True},
+        }
+        structures, stage = forced_structures(state, PROTOCOL, [])
+        self.assertEqual(structures, PROTOCOL)
+        self.assertIn("neighbouring", stage)
+
+    def test_after_neighbours_the_target_is_re_prompted_spatially(self) -> None:
+        observations = [
+            observation(found("tumor", [250.0, 200.0, 60.0], 33.1)),
+            observation(
+                found("larynx", [250.0, 200.0, 40.0]),
+                found("mandible", [250.0, 240.0, 62.0]),
+            ),
+        ]
+        state = {
+            "intent": {"intent": "gtv"},
+            "answers": {"gtv_location_confirmed": True, "gtv_neighbours": True},
+        }
+        structures, stage = forced_structures(state, PROTOCOL, observations)
+        self.assertEqual(len(structures), 1)
+        self.assertIn("re-contouring", stage)
+        # The enriched prompt must be spatial language, not the bare word.
+        self.assertNotEqual(structures[0], "tumor")
+        self.assertIn("larynx", structures[0])
+        self.assertRegex(structures[0], r"superior to|inferior to|anterior to|posterior to|within")
+
+    def test_workflow_stops_dictating_once_refined(self) -> None:
+        state = {
+            "intent": {"intent": "gtv"},
+            "answers": {"gtv_location_confirmed": True, "gtv_neighbours": True,
+                        "gtv_refined": True},
+        }
+        self.assertIsNone(forced_structures(state, PROTOCOL, []))
+
+
+class TumorPromptTests(unittest.TestCase):
+    def test_prompt_names_the_nearest_organ_and_a_direction(self) -> None:
+        observations = [
+            observation(found("tumor", [250.0, 200.0, 60.0], 33.1)),
+            observation(
+                found("larynx", [250.0, 200.0, 40.0]),
+                found("mandible", [250.0, 240.0, 62.0]),
+            ),
+        ]
+        prompt = build_tumor_prompt(observations)
+        # The nearest organ anchors the prompt and carries a direction, so the
+        # spatial cue the prompt exists for is not thrown away.
+        self.assertIn("superior to the larynx", prompt)  # tumor z=60 vs larynx z=40
+        self.assertIn("posterior to the mandible", prompt)  # tumor y=200 vs 240
+        self.assertIn("33.1", prompt)
+
+    def test_target_inside_an_organ_reads_as_within_it(self) -> None:
+        observations = [
+            observation(found("tumor", [250.0, 200.0, 60.0], 12.0)),
+            observation(found("liver", [250.0, 200.0, 60.5])),
+        ]
+        self.assertIn("within the liver", build_tumor_prompt(observations))
+
+    def test_no_prompt_without_organs_to_anchor_to(self) -> None:
+        self.assertIsNone(build_tumor_prompt([observation(found("tumor", [1.0, 2.0, 3.0]))]))
+
+    def test_no_prompt_without_a_tumor(self) -> None:
+        self.assertIsNone(build_tumor_prompt([observation(found("larynx", [1.0, 2.0, 3.0]))]))
+
+
+if __name__ == "__main__":
+    unittest.main()

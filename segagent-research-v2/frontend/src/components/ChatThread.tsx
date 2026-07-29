@@ -19,6 +19,7 @@ const ACTIONS: Record<string, string> = {
   segment: 'Contouring',
   inspect_mask: 'Measuring existing contours',
   run_qc: 'Checking contours',
+  answer_question: 'Looking at the image',
   ask_user: 'Asking a question',
   final: 'Writing the answer',
 };

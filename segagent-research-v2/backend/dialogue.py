@@ -138,13 +138,12 @@ def gtv_confirm_gate(state) -> PlannerDecision | None:
     """
     if _intent_of(state) != Intent.GTV.value or _fired(state, "gtv_confirm"):
         return None
-    if not _answers(state).get("gtv_blind_attempt"):
+    answers = _answers(state)
+    # Only after the blind attempt actually produced a mask: there is nothing to
+    # confirm otherwise.
+    if not (answers.get("gtv_blind_attempt") and answers.get("gtv_first_mask")):
         return None
-    produced = any(
-        item.get("tool") == "segment" and not item.get("data", {}).get("skipped")
-        for item in (state.get("observations") or [])
-    )
-    if not produced:
+    if answers.get("gtv_location_confirmed") or answers.get("gtv_rejected"):
         return None
     return PlannerDecision(
         action=PlannerAction.ASK_USER,
@@ -211,13 +210,152 @@ def report_scope_gate(state, has_contours: bool) -> PlannerDecision | None:
     )
 
 
+def question_gate(state) -> PlannerDecision | None:
+    """A descriptive question is answered, not acted on.
+
+    "What is in this image?" is visual question answering: it must not trigger a
+    protocol lookup or a segmentation run. Routing this deterministically keeps
+    the planner from turning a question into work the user did not ask for.
+    """
+    if _intent_of(state) != Intent.QUESTION.value or _fired(state, "vqa"):
+        return None
+    intent_data = state.get("intent") or {}
+    if intent_data.get("targets"):
+        return None
+    return PlannerDecision(
+        action=PlannerAction.ANSWER_QUESTION,
+        rationale_summary="A descriptive question about the image; answering it directly.",
+        confidence=1.0,
+        gate="vqa",
+    )
+
+
 def pre_plan_gate(state, organ_names=(), has_contours: bool = False) -> PlannerDecision | None:
     """Deterministic question that must be asked before the model plans."""
     return (
         gtv_confirm_gate(state)
         or gtv_spatial_gate(state, organ_names)
         or report_scope_gate(state, has_contours)
+        or question_gate(state)
     )
+
+
+TUMOR_PROMPT = "tumor"
+
+
+def _measurements(observations) -> list[dict]:
+    rows: list[dict] = []
+    for item in observations or []:
+        data = item.get("data") or {}
+        result = data.get("segment_result")
+        if isinstance(result, dict):
+            rows.extend(
+                row for row in result.get("measurements", []) or [] if row.get("found")
+            )
+    return rows
+
+
+def _is_tumor_row(row) -> bool:
+    return bool(re.search(r"(?<![a-z])(tumou?r|gtv|lesion|mass)(?![a-z])", row.get("structure", ""), re.IGNORECASE))
+
+
+def tumor_measurement(observations) -> dict | None:
+    rows = [row for row in _measurements(observations) if _is_tumor_row(row)]
+    return rows[-1] if rows else None
+
+
+def organ_measurements(observations) -> list[dict]:
+    return [row for row in _measurements(observations) if not _is_tumor_row(row)]
+
+
+def build_tumor_prompt(observations) -> str | None:
+    """Describe the tumor by its position relative to the organs around it.
+
+    This is the enriched prompt: rather than re-running the word "tumor", which
+    would return the same contour, the target is re-prompted with the spatial
+    language VoxTell is actually good at, derived from measured centroids.
+    """
+    target = tumor_measurement(observations)
+    organs = organ_measurements(observations)
+    if target is None or not organs:
+        return None
+    point = target.get("centroid_voxels") or []
+    if len(point) < 3:
+        return None
+
+    def offset(row):
+        other = row.get("centroid_voxels") or []
+        if len(other) < 3:
+            return None
+        return [float(point[i]) - float(other[i]) for i in range(3)]
+
+    scored = []
+    for row in organs:
+        delta = offset(row)
+        if delta is None:
+            continue
+        distance = sum(value * value for value in delta) ** 0.5
+        scored.append((distance, row.get("structure", ""), delta))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0])
+
+    # Canonical volumes are RAS-oriented, so a larger index is further right (x),
+    # anterior (y) and superior (z).
+    def relation(delta) -> str | None:
+        axis = max(range(3), key=lambda i: abs(delta[i]))
+        if abs(delta[axis]) < 2.0:
+            return None  # centroids coincide: the target sits within the organ
+        if axis == 0:
+            return "to the right of" if delta[0] > 0 else "to the left of"
+        if axis == 1:
+            return "anterior to" if delta[1] > 0 else "posterior to"
+        return "superior to" if delta[2] > 0 else "inferior to"
+
+    # The nearest structure is the anchor and carries a direction too: "adjacent
+    # to the larynx" alone throws away the spatial cue the prompt exists for.
+    _, nearest_name, nearest_delta = scored[0]
+    heading = relation(nearest_delta)
+    parts = [
+        f"tumor within the {nearest_name}"
+        if heading is None
+        else f"tumor immediately {heading} the {nearest_name}"
+    ]
+    for _, name, delta in scored[1:3]:
+        direction = relation(delta)
+        parts.append(f"{direction} the {name}" if direction else f"overlapping the {name}")
+    volume = target.get("volume_ml")
+    if isinstance(volume, (int, float)):
+        parts.append(f"approximately {round(float(volume), 1)} mL in volume")
+    return ", ".join(parts)
+
+
+def forced_structures(state, protocol_oars=(), observations=()) -> tuple[list[str], str] | None:
+    """Structures the workflow dictates, overriding what the planner asked for.
+
+    Deterministic so that the sequence the user specified actually happens: a
+    confirmed OAR request contours the whole protocol list rather than a subset
+    the model happened to name, and the tumor workflow walks its stages in order.
+    """
+    intent = _intent_of(state)
+    answers = _answers(state)
+
+    if intent == Intent.GTV.value:
+        if answers.get("gtv_blind_attempt") and not answers.get("gtv_first_mask"):
+            return [TUMOR_PROMPT], "blind first attempt with a fixed prompt"
+        if answers.get("gtv_location_confirmed"):
+            if not answers.get("gtv_neighbours") and protocol_oars:
+                return list(protocol_oars), "contouring neighbouring organs to locate the target"
+            if not answers.get("gtv_refined"):
+                enriched = build_tumor_prompt(observations)
+                if enriched:
+                    return [enriched], "re-contouring the target with a spatial prompt"
+        return None
+
+    if intent == Intent.OAR.value and protocol_oars:
+        if not answers.get("oar_contoured"):
+            return list(protocol_oars), "contouring the confirmed protocol's full structure list"
+    return None
 
 
 def guard_decision(state, decision: PlannerDecision) -> PlannerDecision:

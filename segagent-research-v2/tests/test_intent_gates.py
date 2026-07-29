@@ -69,9 +69,18 @@ class IntentDrivesGatesTests(unittest.TestCase):
             guard_decision(state, segment_decision()).action, PlannerAction.SEGMENT
         )
 
-    def test_plain_question_is_not_gated_and_not_segmented_for(self) -> None:
+    def test_plain_question_is_answered_not_segmented_for(self) -> None:
+        # "What is in this image?" is visual question answering: it must route to
+        # a description, never to a protocol lookup or a segmentation run.
         state = self.state_for("what's in the image")
         self.assertEqual(state["intent"]["intent"], Intent.QUESTION.value)
+        gate = pre_plan_gate(state, self.organs, False)
+        self.assertIsNotNone(gate)
+        self.assertEqual(gate.action, PlannerAction.ANSWER_QUESTION)
+
+    def test_question_is_answered_only_once_per_turn(self) -> None:
+        state = self.state_for("what's in the image")
+        state["gates_fired"] = ["vqa"]
         self.assertIsNone(pre_plan_gate(state, self.organs, False))
 
     def test_report_request_without_contours_asks_first(self) -> None:

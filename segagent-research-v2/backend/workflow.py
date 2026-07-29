@@ -22,7 +22,13 @@ from .schemas import (
     TaskIntent,
     ToolObservation,
 )
-from .dialogue import apply_reply, guard_decision, pre_plan_gate, rejection_notice
+from .dialogue import (
+    apply_reply,
+    forced_structures,
+    guard_decision,
+    pre_plan_gate,
+    rejection_notice,
+)
 from .guards import request_signature
 from .intent import IntentClassifier
 from .prompts import build_prompts, target_type_for
@@ -148,6 +154,7 @@ class SegAgentGraph:
         graph.add_node("segment", self._segment)
         graph.add_node("inspect_mask", self._inspect_mask)
         graph.add_node("run_qc", self._run_qc)
+        graph.add_node("answer_question", self._answer_question)
         graph.add_node("ask_user", self._ask_user)
         graph.add_node("finish", self._finish)
         graph.add_edge(START, "plan")
@@ -159,6 +166,7 @@ class SegAgentGraph:
                 PlannerAction.SEGMENT.value: "segment",
                 PlannerAction.INSPECT_MASK.value: "inspect_mask",
                 PlannerAction.RUN_QC.value: "run_qc",
+                PlannerAction.ANSWER_QUESTION.value: "answer_question",
                 PlannerAction.ASK_USER.value: "ask_user",
                 PlannerAction.FINAL.value: "finish",
             },
@@ -167,6 +175,9 @@ class SegAgentGraph:
         graph.add_edge("segment", "plan")
         graph.add_edge("inspect_mask", "plan")
         graph.add_edge("run_qc", "plan")
+        # Answering a descriptive question completes the turn: it is a reply,
+        # not a step toward some other action.
+        graph.add_edge("answer_question", END)
         # Asking is no longer terminal: the reply flows back into planning, so a
         # clarification can continue the same turn (tumor and OAR dialogues).
         graph.add_edge("ask_user", "plan")
@@ -202,6 +213,38 @@ class SegAgentGraph:
                 event("tool_started", tool="inspect_mask", structures=decision.structures),
                 event("observation", observation=observation.model_dump(mode="json")),
             ],
+        }
+
+    def _answer_question(self, state: AgentState) -> dict:
+        """Answer a descriptive question about the image without running tools."""
+        with self.tracing.span(
+            "invoke_agent",
+            **{
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": "segagent-vqa",
+                "segagent.case_id": state["case_id"],
+            },
+        ):
+            try:
+                answer = self.planner.answer(
+                    state["case_id"], state["question"], state.get("history", [])
+                )
+            except Exception as exc:
+                answer = f"I could not read the image to answer that: {exc}"
+        answer = (answer or "").strip() or "I could not describe this image."
+        findings = self.critic.review(answer, [])
+        blocking = [item for item in findings if item.severity == "error"]
+        if blocking:
+            answer = (
+                "I cannot give that description because it stated values that "
+                "were not measured.\n\n"
+                + "\n".join(f"- {item.message}" for item in blocking)
+            )
+        return {
+            "final_answer": answer,
+            "gates_fired": ["vqa"],
+            "critic_findings": [item.model_dump(mode="json") for item in findings],
+            "events": [event("answer", text=answer), event("run_completed")],
         }
 
     def _run_qc(self, state: AgentState) -> dict:
@@ -380,8 +423,29 @@ class SegAgentGraph:
             ],
         }
 
+    @staticmethod
+    def _protocol_oars(state: AgentState) -> list[str]:
+        """The OAR list from this turn's protocol lookup, if one was matched."""
+        for item in reversed(state.get("observations") or []):
+            if item.get("tool") != "lookup_protocol":
+                continue
+            data = item.get("data") or {}
+            if data.get("matched"):
+                return [str(name) for name in data.get("oars", []) or []]
+        return []
+
     def _segment(self, state: AgentState) -> dict:
         decision = PlannerDecision.model_validate(state["current_decision"])
+        # The workflow, not the model, decides what a confirmed OAR request or a
+        # tumor-refinement stage contours; the model picking a subset is exactly
+        # how a full protocol turns into two organs.
+        override = forced_structures(
+            state, self._protocol_oars(state), state.get("observations") or []
+        )
+        stage = ""
+        if override is not None:
+            structures, stage = override
+            decision = decision.model_copy(update={"structures": structures})
         if not decision.structures:
             observation = ToolObservation(
                 observation_id=f"observation_{uuid.uuid4().hex[:16]}",
@@ -447,11 +511,25 @@ class SegAgentGraph:
             for item in result.measurements
             if item.mask is not None
         ]
+        # Record which stage of a dictated workflow just completed, so the next
+        # planning step advances instead of repeating it.
+        answers = dict(state.get("answers") or {})
+        produced = any(item.mask is not None for item in result.measurements)
+        if stage and produced:
+            if stage.startswith("blind"):
+                answers["gtv_first_mask"] = True
+            elif stage.startswith("contouring neighbouring"):
+                answers["gtv_neighbours"] = True
+            elif stage.startswith("re-contouring"):
+                answers["gtv_refined"] = True
+            elif stage.startswith("contouring the confirmed"):
+                answers["oar_contoured"] = True
         return {
             "observations": [observation.model_dump(mode="json")],
             "seen_signatures": [signature],
+            "answers": answers,
             "events": [
-                event("tool_started", tool="segment", structures=request.structures),
+                event("tool_started", tool="segment", structures=request.structures, stage=stage or None),
                 event("observation", observation=observation.model_dump(mode="json")),
                 *artifact_events,
             ],

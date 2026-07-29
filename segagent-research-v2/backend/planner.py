@@ -84,6 +84,19 @@ def split_thinking(raw: str) -> tuple[str, str]:
     return "", text.strip()
 
 
+VQA_SYSTEM = """You are SegAgent, looking at one 3D medical image with a clinician.
+Answer their question about what the image shows, in a few plain sentences.
+
+- Describe what is visible: modality, body region, and the major structures in
+  view. Name the contours already on the case when they are relevant.
+- State no measurement you were not given. You may say a structure is present or
+  where it lies, but not how large it is unless a measurement is supplied.
+- Do not diagnose, stage, or judge whether anything is abnormal. Describe.
+- If you cannot tell from the views, say so.
+Reply with prose only. No JSON, no headings.
+"""
+
+
 class Planner(Protocol):
     def decide(
         self,
@@ -93,6 +106,13 @@ class Planner(Protocol):
         observations: list[ToolObservation],
         history: list[dict] | None = None,
     ) -> PlannerDecision: ...
+
+    def answer(
+        self,
+        case_id: str,
+        question: str,
+        history: list[dict] | None = None,
+    ) -> str: ...
 
 
 class RulePlanner:
@@ -164,6 +184,18 @@ class RulePlanner:
                 "Please name the anatomical structure or radiotherapy site you want "
                 "to analyze (for example, left kidney, thorax OARs, or pelvic OARs)."
             ),
+        )
+
+    def answer(
+        self,
+        case_id: str,
+        question: str,
+        history: list[dict] | None = None,
+    ) -> str:
+        del case_id, question, history
+        return (
+            "I cannot describe the image without a vision model configured. "
+            "Name a structure and I can contour and measure it."
         )
 
     @staticmethod
@@ -319,6 +351,56 @@ class QwenStructuredPlanner:
                     }
                 )
         raise RuntimeError(f"planner failed structured-output validation: {last_error}")
+
+    def answer(
+        self,
+        case_id: str,
+        question: str,
+        history: list[dict] | None = None,
+    ) -> str:
+        """Answer a descriptive question about the image, in prose.
+
+        This is a separate path from decide(): a question about what the scan
+        shows should produce a description, not an action in a tool schema.
+        """
+        from .imaging import grounding_views, load_volume
+
+        self._ensure()
+        case = self.store.get_case(case_id)
+        volume = load_volume(self.store.artifact_path(case.image))
+        contours = [
+            item.label for item in case.artifacts if item.kind in {"mask", "contour"}
+        ]
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": "Views of the case:"}
+        ]
+        for label, image in grounding_views(volume.data, self.montage_slices):
+            content.extend([
+                {"type": "text", "text": label},
+                {"type": "image", "image": image},
+            ])
+        if contours:
+            content.append(
+                {
+                    "type": "text",
+                    "text": "Contours already on this case: " + ", ".join(dict.fromkeys(contours)),
+                }
+            )
+        for turn in (history or [])[-8:]:
+            role = turn.get("role")
+            text = (turn.get("text") or "").strip()
+            if text:
+                content.append({"type": "text", "text": f"{role}: {text}"})
+        content.append({"type": "text", "text": f"Question: {question}"})
+
+        raw = self._generate(
+            [
+                {"role": "system", "content": VQA_SYSTEM},
+                {"role": "user", "content": content},
+            ]
+        )
+        _, prose = split_thinking(raw)
+        return (prose or raw).strip()
 
     @staticmethod
     def _decode_object(text: str) -> dict:
