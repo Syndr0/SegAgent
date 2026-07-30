@@ -11,7 +11,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.dialogue import build_tumor_prompt, forced_structures
+from backend.dialogue import (
+    STAGE_OAR_FULL,
+    STAGE_TUMOR_BLIND,
+    STAGE_TUMOR_NEIGHBOURS,
+    STAGE_TUMOR_REFINE,
+    build_tumor_prompt,
+    forced_structures,
+)
 
 PROTOCOL = ["brainstem", "spinal cord", "left parotid gland", "larynx", "mandible"]
 
@@ -64,7 +71,7 @@ class TumorStageTests(unittest.TestCase):
         }
         structures, stage = forced_structures(state, PROTOCOL, [])
         self.assertEqual(structures, PROTOCOL)
-        self.assertIn("neighbouring", stage)
+        self.assertEqual(stage, STAGE_TUMOR_NEIGHBOURS)
 
     def test_after_neighbours_the_target_is_re_prompted_spatially(self) -> None:
         observations = [
@@ -80,7 +87,7 @@ class TumorStageTests(unittest.TestCase):
         }
         structures, stage = forced_structures(state, PROTOCOL, observations)
         self.assertEqual(len(structures), 1)
-        self.assertIn("re-contouring", stage)
+        self.assertEqual(stage, STAGE_TUMOR_REFINE)
         # The enriched prompt must be spatial language, not the bare word.
         self.assertNotEqual(structures[0], "tumor")
         self.assertIn("larynx", structures[0])

@@ -15,10 +15,39 @@ class PromptBuilderTests(unittest.TestCase):
             build_prompts(intent, ["left kidney", "liver"]), ["left kidney", "liver"]
         )
 
-    def test_gtv_intent_uses_verbatim_sentence(self) -> None:
+    def test_gtv_intent_keeps_the_clinical_sentence(self) -> None:
+        # The description carries the prompt; only trailing punctuation is shed.
         sentence = "Bronchial carcinoma in the right upper lobe with pleural contact."
         intent = TaskIntent(intent=Intent.GTV, confidence=0.8, source_description=sentence)
-        self.assertEqual(build_prompts(intent, []), [sentence])
+        self.assertEqual(
+            build_prompts(intent, []),
+            ["Bronchial carcinoma in the right upper lobe with pleural contact"],
+        )
+
+    def test_request_phrasing_is_stripped_from_the_prompt(self) -> None:
+        # VoxTell is prompted with a description, not with the user's command.
+        for question, expected in [
+            ("segment the liver tumor", "liver tumor"),
+            ("Please contour the mass in the left upper lobe", "mass in the left upper lobe"),
+            ("where is the tumor?", "tumor"),
+            ("can you delineate all lesions adjacent to the aorta",
+             "lesions adjacent to the aorta"),
+            ("请分割肝脏肿瘤", "肝脏肿瘤"),
+        ]:
+            intent = TaskIntent(intent=Intent.GTV, confidence=0.8, source_description=question)
+            self.assertEqual(build_prompts(intent, []), [expected], question)
+
+    def test_a_bare_description_is_left_alone(self) -> None:
+        # Nothing to strip: the anatomy must survive untouched.
+        for description in [
+            "liver tumor",
+            "a 25 mm mass in the right hepatic lobe",
+            "left parotid gland",
+        ]:
+            intent = TaskIntent(
+                intent=Intent.GTV, confidence=0.8, source_description=description
+            )
+            self.assertEqual(build_prompts(intent, []), [description], description)
 
     def test_gtv_without_description_falls_back_to_structures(self) -> None:
         intent = TaskIntent(intent=Intent.GTV, confidence=0.8)

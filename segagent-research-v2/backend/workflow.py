@@ -19,10 +19,14 @@ from .schemas import (
     PlannerDecision,
     RunEvent,
     SegmentRequest,
+    TargetType,
     TaskIntent,
     ToolObservation,
 )
 from .dialogue import (
+    STAGE_LABELS,
+    STAGE_MARKERS,
+    STAGE_TUMOR_NEIGHBOURS,
     apply_reply,
     forced_structures,
     guard_decision,
@@ -487,6 +491,10 @@ class SegAgentGraph:
                 "events": [event("observation", observation=observation.model_dump(mode="json"))],
             }
         target_type = target_type_for(task_intent)
+        # Neighbouring organs contoured to locate a target are organs, not the
+        # target: tagging them GTV would flag them all as unvalidated tumors.
+        if stage == STAGE_TUMOR_NEIGHBOURS:
+            target_type = TargetType.ORGAN
         request = SegmentRequest(
             case_id=state["case_id"],
             structures=prompts,
@@ -511,25 +519,29 @@ class SegAgentGraph:
             for item in result.measurements
             if item.mask is not None
         ]
-        # Record which stage of a dictated workflow just completed, so the next
-        # planning step advances instead of repeating it.
+        # Record what just completed, so the next planning step advances the
+        # workflow instead of repeating this stage.
         answers = dict(state.get("answers") or {})
         produced = any(item.mask is not None for item in result.measurements)
-        if stage and produced:
-            if stage.startswith("blind"):
+        if produced:
+            marker = STAGE_MARKERS.get(stage)
+            if marker:
+                answers[marker] = True
+            # Any tumor contour, however it was prompted, becomes something the
+            # user is asked to confirm before the run builds on it.
+            if target_type == TargetType.GTV:
                 answers["gtv_first_mask"] = True
-            elif stage.startswith("contouring neighbouring"):
-                answers["gtv_neighbours"] = True
-            elif stage.startswith("re-contouring"):
-                answers["gtv_refined"] = True
-            elif stage.startswith("contouring the confirmed"):
-                answers["oar_contoured"] = True
         return {
             "observations": [observation.model_dump(mode="json")],
             "seen_signatures": [signature],
             "answers": answers,
             "events": [
-                event("tool_started", tool="segment", structures=request.structures, stage=stage or None),
+                event(
+                    "tool_started",
+                    tool="segment",
+                    structures=request.structures,
+                    stage=STAGE_LABELS.get(stage) if stage else None,
+                ),
                 event("observation", observation=observation.model_dump(mode="json")),
                 *artifact_events,
             ],

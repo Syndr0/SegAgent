@@ -132,16 +132,16 @@ def gtv_spatial_gate(state, organ_names=()) -> PlannerDecision | None:
 def gtv_confirm_gate(state) -> PlannerDecision | None:
     """After a first tumor mask, confirm its location before building on it.
 
-    This replaces re-running an identical prompt after a rejection: a confirmed
-    location lets the next prompt be enriched with neighbouring anatomy, while a
-    rejection stops the run instead of repeating itself.
+    This applies to every tumor contour, however it was prompted: a described
+    target can land in the wrong place just as a blind one can. Confirming lets
+    the next prompt be enriched with neighbouring anatomy; rejecting stops the
+    run rather than re-running a prompt that would return the same contour.
     """
     if _intent_of(state) != Intent.GTV.value or _fired(state, "gtv_confirm"):
         return None
     answers = _answers(state)
-    # Only after the blind attempt actually produced a mask: there is nothing to
-    # confirm otherwise.
-    if not (answers.get("gtv_blind_attempt") and answers.get("gtv_first_mask")):
+    # Only once a tumor mask actually exists: there is nothing to confirm before.
+    if not answers.get("gtv_first_mask"):
         return None
     if answers.get("gtv_location_confirmed") or answers.get("gtv_rejected"):
         return None
@@ -241,6 +241,29 @@ def pre_plan_gate(state, organ_names=(), has_contours: bool = False) -> PlannerD
 
 
 TUMOR_PROMPT = "tumor"
+
+# Stages the workflow dictates. Named constants rather than prose so the caller
+# can branch on them safely (a stage decides the target type and which marker is
+# recorded, which is too load-bearing for string prefixes).
+STAGE_TUMOR_BLIND = "tumor_blind"
+STAGE_TUMOR_NEIGHBOURS = "tumor_neighbours"
+STAGE_TUMOR_REFINE = "tumor_refine"
+STAGE_OAR_FULL = "oar_full"
+
+STAGE_LABELS = {
+    STAGE_TUMOR_BLIND: "first attempt with a fixed prompt",
+    STAGE_TUMOR_NEIGHBOURS: "contouring neighbouring organs to locate the target",
+    STAGE_TUMOR_REFINE: "re-contouring the target with a spatial prompt",
+    STAGE_OAR_FULL: "contouring the confirmed protocol's full structure list",
+}
+
+# Which answer marker a completed stage records.
+STAGE_MARKERS = {
+    STAGE_TUMOR_BLIND: "gtv_first_mask",
+    STAGE_TUMOR_NEIGHBOURS: "gtv_neighbours",
+    STAGE_TUMOR_REFINE: "gtv_refined",
+    STAGE_OAR_FULL: "oar_contoured",
+}
 
 
 def _measurements(observations) -> list[dict]:
@@ -342,19 +365,19 @@ def forced_structures(state, protocol_oars=(), observations=()) -> tuple[list[st
 
     if intent == Intent.GTV.value:
         if answers.get("gtv_blind_attempt") and not answers.get("gtv_first_mask"):
-            return [TUMOR_PROMPT], "blind first attempt with a fixed prompt"
+            return [TUMOR_PROMPT], STAGE_TUMOR_BLIND
         if answers.get("gtv_location_confirmed"):
             if not answers.get("gtv_neighbours") and protocol_oars:
-                return list(protocol_oars), "contouring neighbouring organs to locate the target"
+                return list(protocol_oars), STAGE_TUMOR_NEIGHBOURS
             if not answers.get("gtv_refined"):
                 enriched = build_tumor_prompt(observations)
                 if enriched:
-                    return [enriched], "re-contouring the target with a spatial prompt"
+                    return [enriched], STAGE_TUMOR_REFINE
         return None
 
     if intent == Intent.OAR.value and protocol_oars:
         if not answers.get("oar_contoured"):
-            return list(protocol_oars), "contouring the confirmed protocol's full structure list"
+            return list(protocol_oars), STAGE_OAR_FULL
     return None
 
 
