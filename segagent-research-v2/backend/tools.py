@@ -5,16 +5,16 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .expert import SegmentationBackend
-from .imaging import mask_geometry, render_overlays, save_mask
 from .knowledge import HybridKnowledgeBase
 from .qc import ContourQCEngine
 from .schemas import (
     EvidenceRecord,
     Finding,
+    MetricEvidence,
     ProtocolMatch,
     QCReport,
     SegmentRequest,
@@ -24,6 +24,9 @@ from .schemas import (
 )
 from .storage import ResearchStore
 from .verifier import GroundingVerifier
+
+if TYPE_CHECKING:
+    from .expert import SegmentationBackend
 
 
 def observation_id() -> str:
@@ -89,6 +92,8 @@ class SegmentationTool:
         self.overlay_slices = overlay_slices
 
     def run(self, request: SegmentRequest) -> tuple[SegmentResult, ToolObservation]:
+        from .imaging import mask_geometry, render_overlays, save_mask
+
         case = self.store.get_case(request.case_id)
         image_path = self.store.artifact_path(case.image)
         started = time.perf_counter()
@@ -120,6 +125,7 @@ class SegmentationTool:
                 {
                     "source_model": self.backend.name,
                     "source_version": self.backend.version,
+                    "artifact_version": 1,
                     "purpose": request.purpose,
                     "target_type": request.target_type.value,
                 },
@@ -150,6 +156,15 @@ class SegmentationTool:
                     mean_intensity=round(float(volume.data[mask].mean()), 3),
                     bbox_voxels=bbox,
                     centroid_voxels=centroid,
+                    centroid_mm=(
+                        np.round(
+                            volume.affine
+                            @ np.asarray([*centroid, 1.0], dtype=float),
+                            2,
+                        )[:3].tolist()
+                        if centroid is not None
+                        else None
+                    ),
                     mask=mask_ref,
                     overlays=overlays,
                 )
@@ -211,19 +226,19 @@ class MaskInspectionTool:
             for item in case.artifacts
             if item.kind in {"mask", "contour"}
         ]
-        # Prefer an exact id or label match, then the most recent partial match.
+        # Resolve only an exact case-owned id or exact label. Pronouns and
+        # partial label guesses are resolved earlier from MessageArtifactContext.
         for item in reversed(candidates):
             if item.artifact_id == name:
                 return item
         for item in reversed(candidates):
             if item.label.casefold() == wanted:
                 return item
-        for item in reversed(candidates):
-            if wanted in item.label.casefold() or item.label.casefold() in wanted:
-                return item
         return None
 
     def run(self, case_id: str, structures: list[str]) -> tuple[list[StructureMeasurement], ToolObservation]:
+        from .imaging import load_mask, load_volume, mask_geometry
+
         case = self.store.get_case(case_id)
         volume = load_volume(self.store.artifact_path(case.image))
         voxel_ml = float(np.prod(volume.spacing) / 1000.0)
@@ -258,6 +273,15 @@ class MaskInspectionTool:
                 mean_intensity=round(float(volume.data[mask].mean()), 3),
                 bbox_voxels=bbox,
                 centroid_voxels=centroid,
+                centroid_mm=(
+                    np.round(
+                        volume.affine
+                        @ np.asarray([*centroid, 1.0], dtype=float),
+                        2,
+                    )[:3].tolist()
+                    if centroid is not None
+                    else None
+                ),
                 mask=ref,
             )
             measurements.append(measurement)
@@ -268,7 +292,9 @@ class MaskInspectionTool:
             lines.append(
                 f"{ref.label} [{source}]: {measurement.voxels} voxels, "
                 f"{measurement.volume_ml} mL, mean intensity {measurement.mean_intensity}, "
-                f"bbox {measurement.bbox_voxels}, centroid {measurement.centroid_voxels}"
+                f"bbox {measurement.bbox_voxels}, voxel centroid "
+                f"{measurement.centroid_voxels}, world centroid "
+                f"{measurement.centroid_mm} mm"
             )
 
         summary = "Existing contour measurements:\n- " + "\n- ".join(lines or ["nothing to inspect"])
@@ -321,32 +347,41 @@ class ContourQCTool:
                 )
         if report.targets:
             lines.append(
-                "Target volumes are taken as given (a model cannot validate a clinical target); "
-                "described only:"
+                "Target volumes are not automatically assessed against the anatomy model; "
+                "their uploaded geometry is described only:"
             )
             for item in report.targets:
                 near = ", ".join(item.near) if item.near else "no contoured organs nearby"
                 lines.append(
-                    f"{item.structure}: {item.volume_ml} mL, centroid {item.centroid_voxels}, "
-                    f"closest contoured structures: {near}"
+                    f"{item.structure} [{item.assessment_status}]: {item.volume_ml} mL, "
+                    f"world centroid {item.centroid_mm} mm, closest contoured "
+                    f"structures by surface distance: {near}"
                 )
         if report.completeness:
             completeness = report.completeness
-            missing = ", ".join(completeness.missing) if completeness.missing else "none"
-            citation = " ".join(completeness.citations) or "[local protocol registry]"
-            lines.append(
-                f"Protocol structure list for {completeness.site}: "
-                f"structures with no contour in this case: {missing}. Source: {citation}"
-            )
+            applicability = completeness.applicability
+            if applicability and applicability.status == "not_assessed":
+                lines.append(f"Protocol completeness not assessed: {applicability.reason}")
+            else:
+                missing = ", ".join(completeness.missing) if completeness.missing else "none"
+                source = " ".join(completeness.citations) or completeness.source or "protocol registry"
+                lines.append(
+                    f"Protocol structure list for {completeness.site}: "
+                    f"structures with no exact canonical contour match: {missing}. "
+                    f"Applicability: {applicability.reason if applicability else 'not recorded'} "
+                    f"Source: {source}"
+                )
         for warning in report.warnings:
             lines.append(f"Warning: {warning}")
+        for item in report.metric_evidence:
+            evidence_ids.extend(item.artifact_ids)
 
         return report, ToolObservation(
             observation_id=observation_id(),
             tool="run_qc",
             summary="\n- ".join(["Contour QC evidence:", *lines]) if lines else "No QC evidence.",
             data={"qc_report": report.model_dump(mode="json")},
-            evidence_ids=evidence_ids,
+            evidence_ids=list(dict.fromkeys(evidence_ids)),
         )
 
 
@@ -395,7 +430,9 @@ class EvidenceCritic:
             tool=observation.tool,
             summary=observation.summary,
             values=EvidenceCritic._values(observation),
+            metrics=EvidenceCritic._metrics(observation),
             citations=EvidenceCritic._citations(observation),
+            artifact_ids=list(observation.evidence_ids),
         )
 
     @staticmethod
@@ -418,9 +455,118 @@ class EvidenceCritic:
                     for axis, coordinate in enumerate(item.get("centroid_voxels") or []):
                         if isinstance(coordinate, (int, float)):
                             values[f"seg{index}_centroid_{axis}"] = float(coordinate)
+                    for axis, coordinate in enumerate(item.get("centroid_mm") or []):
+                        if isinstance(coordinate, (int, float)):
+                            values[f"seg{index}_centroid_mm_{axis}"] = float(coordinate)
+            qc_report = data.get("qc_report")
+            if isinstance(qc_report, dict):
+                for index, item in enumerate(qc_report.get("metric_evidence", []) or []):
+                    value = item.get("value") if isinstance(item, dict) else None
+                    metric = item.get("metric") if isinstance(item, dict) else None
+                    if isinstance(value, (int, float)) and metric:
+                        values[f"qc{index}_{metric}"] = float(value)
+            report_evidence = data.get("report_evidence")
+            if isinstance(report_evidence, dict):
+                for index, item in enumerate(
+                    report_evidence.get("metric_evidence", []) or []
+                ):
+                    value = item.get("value") if isinstance(item, dict) else None
+                    metric = item.get("metric") if isinstance(item, dict) else None
+                    if isinstance(value, (int, float)) and metric:
+                        values[f"report{index}_{metric}"] = float(value)
         except Exception:
             return values
         return values
+
+    @staticmethod
+    def _metrics(observation: ToolObservation) -> list[MetricEvidence]:
+        """Preserve metric, unit, source, and artifacts for contextual checking."""
+        metrics: list[MetricEvidence] = []
+        try:
+            data = observation.data or {}
+            qc_report = data.get("qc_report")
+            if isinstance(qc_report, dict):
+                for item in qc_report.get("metric_evidence", []) or []:
+                    if isinstance(item, dict):
+                        metrics.append(MetricEvidence.model_validate(item))
+            report_evidence = data.get("report_evidence")
+            if isinstance(report_evidence, dict):
+                for item in report_evidence.get("metric_evidence", []) or []:
+                    if isinstance(item, dict):
+                        metrics.append(MetricEvidence.model_validate(item))
+
+            segment = data.get("segment_result")
+            if isinstance(segment, dict):
+                model_name = str(segment.get("model_name") or observation.tool)
+                for index, item in enumerate(segment.get("measurements", []) or []):
+                    if not isinstance(item, dict):
+                        continue
+                    structure = str(item.get("structure") or "")
+                    mask = item.get("mask") if isinstance(item.get("mask"), dict) else {}
+                    artifact_ids = [
+                        value
+                        for value in [mask.get("artifact_id"), *observation.evidence_ids]
+                        if value
+                    ]
+                    for metric, key, unit in (
+                        ("voxel_count", "voxels", "voxel"),
+                        ("volume", "volume_ml", "mL"),
+                        ("mean_intensity", "mean_intensity", "HU"),
+                    ):
+                        value = item.get(key)
+                        if isinstance(value, (int, float)):
+                            metrics.append(
+                                MetricEvidence(
+                                    evidence_id=(
+                                        f"{observation.observation_id}:seg{index}:{metric}"
+                                    ),
+                                    structure=structure or None,
+                                    metric=metric,
+                                    value=float(value),
+                                    unit=unit,
+                                    source=model_name,
+                                    artifact_ids=list(dict.fromkeys(artifact_ids)),
+                                )
+                            )
+                    for axis, value in zip(
+                        ("x", "y", "z"), item.get("centroid_voxels") or []
+                    ):
+                        if isinstance(value, (int, float)):
+                            metrics.append(
+                                MetricEvidence(
+                                    evidence_id=(
+                                        f"{observation.observation_id}:seg{index}:"
+                                        f"centroid_{axis}"
+                                    ),
+                                    structure=structure or None,
+                                    metric=f"centroid_{axis}",
+                                    value=float(value),
+                                    unit="voxel",
+                                    source=model_name,
+                                    artifact_ids=list(dict.fromkeys(artifact_ids)),
+                                )
+                            )
+                    for axis, value in zip(
+                        ("x", "y", "z"), item.get("centroid_mm") or []
+                    ):
+                        if isinstance(value, (int, float)):
+                            metrics.append(
+                                MetricEvidence(
+                                    evidence_id=(
+                                        f"{observation.observation_id}:seg{index}:"
+                                        f"centroid_mm_{axis}"
+                                    ),
+                                    structure=structure or None,
+                                    metric=f"centroid_{axis}",
+                                    value=float(value),
+                                    unit="mm",
+                                    source="NIfTI world geometry",
+                                    artifact_ids=list(dict.fromkeys(artifact_ids)),
+                                )
+                            )
+        except Exception:
+            return metrics
+        return metrics
 
     @staticmethod
     def _citations(observation: ToolObservation) -> list[str]:
@@ -431,6 +577,16 @@ class EvidenceCritic:
             protocol = data.get("protocol")
             if isinstance(protocol, dict):
                 citations.extend(str(c) for c in protocol.get("citations", []) or [])
+            qc_report = data.get("qc_report")
+            if isinstance(qc_report, dict):
+                completeness = qc_report.get("completeness")
+                if isinstance(completeness, dict):
+                    citations.extend(
+                        str(c) for c in completeness.get("citations", []) or []
+                    )
+                    source = completeness.get("source")
+                    if source:
+                        citations.append(str(source))
             for hit in data.get("guideline_hits", []) or []:
                 citation = hit.get("citation") if isinstance(hit, dict) else None
                 if citation:
@@ -438,4 +594,3 @@ class EvidenceCritic:
         except Exception:
             return citations
         return citations
-

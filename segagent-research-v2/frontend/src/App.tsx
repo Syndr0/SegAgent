@@ -136,27 +136,54 @@ export default function App() {
         setCaseRecord(restoredCase);
         setMasks(masksFromCase(restoredCase));
 
+        const conversationRunIds: string[] = [];
+        let conversationPendingRunId: string | null = null;
+        let conversationLoaded = false;
         try {
           const conversation = await getConversation(restoredCase.case_id, controller.signal);
           setHistory(conversation.messages);
-          setAwaitingReply(Boolean(conversation.conversation.pending_run_id));
+          conversationPendingRunId = conversation.conversation.pending_run_id || null;
+          setAwaitingReply(Boolean(conversationPendingRunId));
+          conversationLoaded = true;
+          for (const message of conversation.messages) {
+            if (message.run_id && !conversationRunIds.includes(message.run_id)) {
+              conversationRunIds.push(message.run_id);
+            }
+          }
+          if (
+            conversationPendingRunId
+            && !conversationRunIds.includes(conversationPendingRunId)
+          ) {
+            conversationRunIds.push(conversationPendingRunId);
+          }
         } catch (caught) {
           if (isAbortError(caught)) throw caught;
         }
 
         const savedRunId = readSaved(SAVED_RUN);
-        if (savedRunId) {
-          try {
-            const past = await getRun(savedRunId, controller.signal);
-            if (past.run.case_id === restoredCase.case_id) {
-              setRunId(past.run.run_id);
-              setEvents(past.events);
-              setAwaitingReply(past.run.status === 'waiting_reply');
-            } else {
-              forget(SAVED_RUN);
-            }
-          } catch (caught) {
-            if (isAbortError(caught)) throw caught;
+        if (savedRunId && !conversationRunIds.includes(savedRunId)) {
+          conversationRunIds.push(savedRunId);
+        }
+        if (conversationRunIds.length) {
+          const histories = await Promise.allSettled(
+            conversationRunIds.map(id => getRun(id, controller.signal)),
+          );
+          if (controller.signal.aborted) return;
+          const available = histories.flatMap(result =>
+            result.status === 'fulfilled' && result.value.run.case_id === restoredCase.case_id
+              ? [result.value]
+              : [],
+          );
+          setEvents(available.flatMap(item => item.events));
+
+          const active = available.find(item => item.run.run_id === savedRunId)
+            || available.find(item => item.run.run_id === conversationPendingRunId)
+            || available[available.length - 1];
+          if (active) {
+            setRunId(active.run.run_id);
+            if (!conversationLoaded) setAwaitingReply(active.run.status === 'waiting_reply');
+          }
+          if (savedRunId && !available.some(item => item.run.run_id === savedRunId)) {
             forget(SAVED_RUN);
           }
         }
@@ -290,6 +317,9 @@ export default function App() {
     setError('');
     setNotice(awaitingReply ? 'Sending reply…' : 'Working…');
     const stream = { outcome: 'unknown' as StreamOutcome };
+    const visibleMaskIds = masks
+      .filter(mask => mask.visible)
+      .map(mask => mask.artifact_id);
     try {
       await sendMessage(
         expectedCaseId,
@@ -304,6 +334,13 @@ export default function App() {
           save(SAVED_RUN, id);
         },
         controller.signal,
+        {
+          visible_mask_ids: visibleMaskIds,
+          // Visibility is ambient viewer state, not an explicit reference.
+          // Keeping these separate prevents a 15–20-mask OAR view from being
+          // interpreted as though the user named every contour in the prompt.
+          referenced_artifact_ids: [],
+        },
       );
       if (stream.outcome === 'completed') setNotice('Done.');
       else if (stream.outcome === 'failed') setNotice('');

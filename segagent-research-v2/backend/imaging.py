@@ -110,6 +110,38 @@ def render_overlays(
     return output
 
 
+def mask_grounding_views(
+    volume: np.ndarray, mask: np.ndarray, axial_count: int = 3
+) -> list[tuple[str, Image.Image]]:
+    """Render image-plus-mask views centred on one concrete contour artifact."""
+
+    binary = np.asarray(mask, dtype=bool)
+    if binary.shape != volume.shape or not binary.any():
+        return []
+    output = [
+        (f"axial mask overlay z={z}", image)
+        for z, image in render_overlays(volume, binary, axial_count)
+    ]
+    lo, hi = window_bounds(volume)
+
+    def colored(base: np.ndarray, selected: np.ndarray) -> Image.Image:
+        grey = to_uint8(base, lo, hi).astype(np.float32)
+        rgb = np.stack([grey, grey, grey], axis=-1)
+        rgb[selected] = 0.45 * rgb[selected] + 0.55 * np.array(
+            [255.0, 40.0, 40.0], dtype=np.float32
+        )
+        return Image.fromarray(rgb.astype(np.uint8))
+
+    y = int(np.argmax(binary.sum(axis=(0, 2))))
+    coronal = colored(volume[:, y, :].T[::-1], binary[:, y, :].T[::-1])
+    output.append((f"coronal mask overlay y={y}", coronal))
+
+    x = int(np.argmax(binary.sum(axis=(1, 2))))
+    sagittal = colored(volume[x, :, :].T[::-1], binary[x, :, :].T[::-1])
+    output.append((f"sagittal mask overlay x={x}", sagittal))
+    return output
+
+
 def mask_geometry(mask: np.ndarray) -> tuple[int, list[list[int]] | None, list[float] | None]:
     coordinates = np.argwhere(np.asarray(mask) > 0)
     if coordinates.size == 0:
@@ -118,4 +150,3 @@ def mask_geometry(mask: np.ndarray) -> tuple[int, list[list[int]] | None, list[f
     upper = coordinates.max(axis=0).astype(int).tolist()
     centroid = coordinates.mean(axis=0).round(2).tolist()
     return int(coordinates.shape[0]), [lower, upper], centroid
-

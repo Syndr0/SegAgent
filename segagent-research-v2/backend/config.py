@@ -26,19 +26,22 @@ class Settings(BaseSettings):
     knowledge_dir: Path = PROJECT_DIR / "knowledge"
     checkpoint_db: Path = PROJECT_DIR / ".research_data" / "checkpoints.sqlite"
     voxtell_model: Path | None = None
-    # Any vision-language checkpoint: the planner loads it through the Auto
-    # classes, in bf16 on GPU. Set SEGAGENT_LLM_MODEL to the exact model id you
-    # have pulled (a thinking-capable VL model is recommended).
-    llm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
-    # Ask the chat template for the model's thinking channel, shown in the UI as
-    # foldable reasoning. Ignored by templates that have no thinking switch.
+    # Qwen3.5 is natively multimodal and exposes a thinking channel. The 9B
+    # checkpoint is the deployable default; the 27B checkpoint remains an
+    # evaluation candidate and can be selected with SEGAGENT_LLM_MODEL.
+    llm_model: str = "Qwen/Qwen3.5-9B"
+    # Thinking is a product requirement: the raw model channel is streamed and
+    # displayed separately from clinical evidence. Templates without a thinking
+    # switch simply ignore the argument.
     enable_thinking: bool = True
     planner: Literal["qwen", "rule"] = "qwen"
     device: str = "auto"
     max_steps: int = Field(default=8, ge=2, le=24)
     montage_slices: int = Field(default=6, ge=2, le=16)
     overlay_slices: int = Field(default=3, ge=1, le=8)
-    max_new_tokens: int = Field(default=512, ge=64, le=4096)
+    # 512 tokens can end inside <think> before the structured decision is
+    # emitted. Leave enough room for both reasoning and the validated payload.
+    max_new_tokens: int = Field(default=2048, ge=256, le=16384)
     retrieve_k: int = Field(default=4, ge=1, le=20)
     semantic_weight: float = Field(default=0.45, ge=0.0, le=1.0)
     trace_content: bool = False
@@ -56,4 +59,3 @@ def get_settings() -> Settings:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
     return settings
-

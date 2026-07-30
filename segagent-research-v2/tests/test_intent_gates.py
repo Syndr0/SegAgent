@@ -73,7 +73,7 @@ class IntentDrivesGatesTests(unittest.TestCase):
         # "What is in this image?" is visual question answering: it must route to
         # a description, never to a protocol lookup or a segmentation run.
         state = self.state_for("what's in the image")
-        self.assertEqual(state["intent"]["intent"], Intent.QUESTION.value)
+        self.assertEqual(state["intent"]["intent"], Intent.VQA.value)
         gate = pre_plan_gate(state, self.organs, False)
         self.assertIsNotNone(gate)
         self.assertEqual(gate.action, PlannerAction.ANSWER_QUESTION)

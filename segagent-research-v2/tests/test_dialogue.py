@@ -8,6 +8,7 @@ from backend.dialogue import (
     apply_reply,
     guard_decision,
     has_spatial_detail,
+    mask_question_gate,
     pre_plan_gate,
     rejection_notice,
     reply_sentiment,
@@ -123,6 +124,32 @@ class GtvGateTests(unittest.TestCase):
         self.assertTrue(update["answers"]["gtv_location_confirmed"])
         self.assertIsNone(rejection_notice({"answers": update["answers"]}))
 
+    def test_uncertain_reply_is_not_confirmation(self) -> None:
+        update = apply_reply(gtv_state(), "gtv_confirm", "I'm not sure", ORGANS)
+        self.assertNotIn("gtv_location_confirmed", update["answers"])
+        self.assertTrue(update["answers"]["gtv_confirmation_uncertain"])
+
+    def test_location_correction_requests_a_new_first_attempt(self) -> None:
+        state = gtv_state(
+            answers={"gtv_first_mask": True},
+            intent={"intent": "gtv", "source_description": "tumor"},
+        )
+        update = apply_reply(
+            state, "gtv_confirm", "no, it is in the left kidney", ORGANS
+        )
+        self.assertNotIn("gtv_first_mask", update["answers"])
+        self.assertIn("left kidney", update["intent"]["source_description"])
+
+    def test_laterality_is_not_mistaken_for_confirmation(self) -> None:
+        update = apply_reply(
+            gtv_state(answers={"gtv_first_mask": True}),
+            "gtv_confirm",
+            "the right upper lobe",
+            ORGANS,
+        )
+        self.assertNotIn("gtv_location_confirmed", update["answers"])
+        self.assertIn("right upper lobe", update["answers"]["gtv_description"])
+
 
 class OarGuardTests(unittest.TestCase):
     def test_blocks_segmenting_without_a_confirmed_site(self) -> None:
@@ -141,13 +168,102 @@ class OarGuardTests(unittest.TestCase):
 
     def test_reply_confirms_the_site(self) -> None:
         state = {"intent": {"intent": "oar"}}
-        update = apply_reply(state, "oar_site", "thorax", ORGANS)
-        self.assertEqual(update["intent"]["site"], "thorax")
-        self.assertEqual(update["answers"]["site"], "thorax")
+        update = apply_reply(
+            state,
+            "oar_site",
+            "thorax",
+            ORGANS,
+            {"thorax": "Thorax"},
+        )
+        self.assertEqual(update["intent"]["site"], "Thorax")
+        self.assertEqual(update["answers"]["site"], "Thorax")
+
+    def test_yes_without_a_proposed_site_is_not_a_site(self) -> None:
+        update = apply_reply(
+            {"intent": {"intent": "oar"}},
+            "oar_site",
+            "yes",
+            ORGANS,
+            {"thorax": "Thorax"},
+        )
+        self.assertNotIn("site", update["answers"])
 
     def test_plain_organ_request_is_not_guarded(self) -> None:
         state = {"intent": {"intent": "organ", "targets": ["liver"]}}
         self.assertEqual(guard_decision(state, segment_decision()).action, PlannerAction.SEGMENT)
+
+
+class MaskQuestionTests(unittest.TestCase):
+    def test_quantitative_pronoun_requires_one_exact_mask(self) -> None:
+        state = {
+            "intent": {"intent": "mask_question"},
+            "question": "how big is that mask?",
+            "message_context": {
+                "visible_mask_ids": ["artifact_a", "artifact_b"],
+                "referenced_artifact_ids": ["artifact_a", "artifact_b"],
+            },
+            "artifact_inventory": [
+                {"artifact_id": "artifact_a", "kind": "mask", "active": True},
+                {"artifact_id": "artifact_b", "kind": "mask", "active": True},
+            ],
+        }
+        decision = mask_question_gate(state)
+        self.assertEqual(decision.action, PlannerAction.ASK_USER)
+        self.assertEqual(decision.gate, "mask_reference")
+
+    def test_selected_mask_is_inspected_by_id(self) -> None:
+        state = {
+            "intent": {"intent": "mask_question"},
+            "question": "how big is that mask?",
+            "message_context": {
+                "selected_mask_id": "artifact_b",
+                "visible_mask_ids": ["artifact_a", "artifact_b"],
+            },
+        }
+        decision = mask_question_gate(state)
+        self.assertEqual(decision.action, PlannerAction.INSPECT_MASK)
+        self.assertEqual(decision.structures, ["artifact_b"])
+
+    def test_visual_pronoun_with_many_masks_asks_which_one(self) -> None:
+        state = {
+            "intent": {"intent": "mask_question"},
+            "question": "what does this mask show?",
+            "message_context": {
+                "visible_mask_ids": ["artifact_a", "artifact_b"],
+            },
+            "artifact_inventory": [
+                {"artifact_id": "artifact_a", "kind": "mask", "active": True},
+                {"artifact_id": "artifact_b", "kind": "mask", "active": True},
+            ],
+        }
+        decision = mask_question_gate(state)
+        self.assertEqual(decision.action, PlannerAction.ASK_USER)
+        self.assertEqual(decision.gate, "mask_reference")
+
+    def test_named_existing_mask_resolves_among_many_visible_masks(self) -> None:
+        state = {
+            "intent": {"intent": "mask_question", "targets": ["left eye"]},
+            "question": "left eye",
+            "message_context": {
+                "visible_mask_ids": ["artifact_a", "artifact_b"],
+            },
+            "artifact_inventory": [
+                {
+                    "artifact_id": "artifact_a",
+                    "label": "left eye",
+                    "kind": "mask",
+                    "active": True,
+                },
+                {
+                    "artifact_id": "artifact_b",
+                    "label": "right eye",
+                    "kind": "mask",
+                    "active": True,
+                },
+            ],
+        }
+        decision = mask_question_gate(state)
+        self.assertEqual(decision.action, PlannerAction.ANSWER_QUESTION)
 
 
 if __name__ == "__main__":

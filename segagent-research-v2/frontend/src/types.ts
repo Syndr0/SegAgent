@@ -19,43 +19,77 @@ export interface CaseRecord {
   metadata: Record<string, unknown>;
 }
 
+export type RunEventType =
+  | 'run_started'
+  | 'planner_decision'
+  | 'thinking_delta'
+  | 'thinking'
+  | 'reasoning_summary'
+  | 'phase_started'
+  | 'phase_completed'
+  | 'phase_failed'
+  | 'tool_started'
+  | 'observation'
+  | 'artifact'
+  | 'question_pending'
+  | 'reply_recorded'
+  | 'answer_delta'
+  | 'answer'
+  | 'error'
+  | 'run_completed';
+
 export interface RunEvent {
   event_id: string;
   run_id: string;
   case_id: string;
   sequence: number;
-  type:
-    | 'run_started'
-    | 'planner_decision'
-    | 'thinking'
-    | 'tool_started'
-    | 'observation'
-    | 'artifact'
-    | 'question_pending'
-    | 'reply_recorded'
-    | 'answer'
-    | 'error'
-    | 'run_completed';
+  type: RunEventType;
   timestamp: string;
   payload: {
     [key: string]: unknown;
     action?: string;
     artifact?: ArtifactRef;
+    channel?: 'planner' | 'vqa' | string;
+    complete?: boolean;
+    delta?: string;
+    detail?: string;
+    error?: string;
     intent?: TaskIntent;
+    label?: string;
     message?: string;
     observation?: { tool?: string; summary?: string };
+    phase?: string;
     query?: string;
     question?: string;
     rationale_summary?: string;
+    step?: number;
     structures?: string[];
+    summary?: string;
     text?: string;
     thinking?: string;
     tool?: string;
   };
 }
 
+export interface MessageContext {
+  visible_mask_ids?: string[];
+  referenced_artifact_ids?: string[];
+  selected_mask_id?: string;
+}
+
 export interface TaskIntent {
-  intent: 'organ' | 'oar' | 'gtv' | 'qc' | 'report' | 'protocol' | 'question';
+  intent:
+    | 'organ'
+    | 'oar'
+    | 'gtv'
+    | 'qc'
+    | 'report'
+    | 'protocol'
+    | 'vqa'
+    | 'mask_question'
+    | 'ambiguous'
+    | 'missing_input'
+    | 'question';
   confidence: number;
   targets: string[];
   site?: string | null;

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any, Protocol
+from threading import Thread
+from typing import Any, Callable, Protocol
 
+from .intent import match_canonical_terms
 from .knowledge import HybridKnowledgeBase, normalize
-from .schemas import PlannerAction, PlannerDecision, ToolObservation
+from .schemas import PlannerAction, PlannerAnswer, PlannerDecision, ToolObservation
 from .storage import ResearchStore
 
 
@@ -29,8 +30,10 @@ Available actions:
 Workflows:
 - Organs at risk without a stated treatment site: look at the image, propose the
   most likely site, and use ask_user to confirm it ("This looks like a thorax
-  scan — shall I contour the thoracic OAR set?"). Do not contour before the user
-  agrees. Once a site is confirmed, use lookup_protocol and segment its list.
+  scan — shall I contour the thoracic OAR set?"). Put the proposed canonical
+  site in site_query even though the action is ask_user. Do not contour before
+  the user agrees. Once a site is confirmed, use lookup_protocol and segment
+  its list.
 - Tumor target: the prompt you pass to segment should be the user's spatial
   description, not the bare word "tumor" — the description is what makes the
   segmentation work. After the user confirms a first attempt is in the right
@@ -61,7 +64,7 @@ Rules:
 
 # Fields the model must not set: they are filled by deterministic code, and the
 # reasoning is captured from the model's thinking channel instead.
-_MODEL_OWNED_EXCLUDED = ("gate", "thinking")
+_MODEL_OWNED_EXCLUDED = ("gate", "thinking", "workflow_stage")
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -82,6 +85,40 @@ def split_thinking(raw: str) -> tuple[str, str]:
         # Thinking was truncated before it closed; there is no payload yet.
         return text.lstrip()[len(THINK_OPEN):].strip(), ""
     return "", text.strip()
+
+
+class ThinkingDeltaParser:
+    """Extract only live text inside ``<think>`` from arbitrary token chunks."""
+
+    def __init__(self, emit: Callable[[str], None] | None = None):
+        self.emit = emit
+        self.raw = ""
+        self.emitted = 0
+        self.closed = False
+
+    def feed(self, chunk: str) -> None:
+        if not chunk or self.closed:
+            return
+        self.raw += chunk
+        start = self.raw.find(THINK_OPEN)
+        if start < 0:
+            return
+        body_start = start + len(THINK_OPEN)
+        close = self.raw.find(THINK_CLOSE, body_start)
+        body_end = close if close >= 0 else len(self.raw)
+        if close < 0:
+            # Hold a possible partial closing tag until the next token chunk.
+            for size in range(min(len(THINK_CLOSE) - 1, body_end - body_start), 0, -1):
+                if self.raw.endswith(THINK_CLOSE[:size]):
+                    body_end -= size
+                    break
+        body = self.raw[body_start:body_end]
+        if len(body) > self.emitted:
+            delta = body[self.emitted:]
+            self.emitted = len(body)
+            if self.emit:
+                self.emit(delta)
+        self.closed = close >= 0
 
 
 VQA_SYSTEM = """You are SegAgent, looking at one 3D medical image with a clinician.
@@ -105,6 +142,8 @@ class Planner(Protocol):
         step: int,
         observations: list[ToolObservation],
         history: list[dict] | None = None,
+        context: dict | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> PlannerDecision: ...
 
     def answer(
@@ -112,7 +151,9 @@ class Planner(Protocol):
         case_id: str,
         question: str,
         history: list[dict] | None = None,
-    ) -> str: ...
+        context: dict | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+    ) -> PlannerAnswer: ...
 
 
 class RulePlanner:
@@ -137,10 +178,28 @@ class RulePlanner:
         step: int,
         observations: list[ToolObservation],
         history: list[dict] | None = None,
+        context: dict | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> PlannerDecision:
-        del case_id, step, history
+        del case_id, step, history, context, on_thinking_delta
         used = {item.tool for item in observations}
         lowered = normalize(question)
+        asks_qc = (
+            any(term in lowered for term in ("qc", "quality control", "quality-control", "质控"))
+            or (
+                any(term in lowered for term in ("check", "audit", "review", "verify", "inspect"))
+                and any(
+                    term in lowered
+                    for term in ("contour", "contours", "segmentation", "structures")
+                )
+            )
+        )
+        if asks_qc and "run_qc" not in used:
+            return PlannerDecision(
+                action=PlannerAction.RUN_QC,
+                rationale_summary="Run contour QC before summarizing the uploaded structures.",
+                confidence=0.95,
+            )
         asks_protocol = any(
             term in lowered
             for term in ("oar", "organs at risk", "radiotherapy", "radiation plan", "contour all")
@@ -166,7 +225,7 @@ class RulePlanner:
                         structures=structures,
                     )
 
-        explicit = [name for name in self.organ_names if name in lowered]
+        explicit = match_canonical_terms(lowered, self.organ_names)
         if explicit and "segment" not in used:
             return PlannerDecision(
                 action=PlannerAction.SEGMENT,
@@ -174,7 +233,15 @@ class RulePlanner:
                 confidence=0.95,
                 structures=explicit,
             )
-        if "segment" in used or "lookup_protocol" in used:
+        if used.intersection(
+            {
+                "segment",
+                "lookup_protocol",
+                "inspect_mask",
+                "run_qc",
+                "build_report_evidence",
+            }
+        ):
             return self._final_from_observations(observations)
         return PlannerDecision(
             action=PlannerAction.ASK_USER,
@@ -191,11 +258,15 @@ class RulePlanner:
         case_id: str,
         question: str,
         history: list[dict] | None = None,
-    ) -> str:
-        del case_id, question, history
-        return (
-            "I cannot describe the image without a vision model configured. "
-            "Name a structure and I can contour and measure it."
+        context: dict | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+    ) -> PlannerAnswer:
+        del case_id, question, history, context, on_thinking_delta
+        return PlannerAnswer(
+            text=(
+                "I cannot describe the image without a vision model configured. "
+                "Name a structure and I can contour and measure it."
+            )
         )
 
     @staticmethod
@@ -222,7 +293,7 @@ class QwenStructuredPlanner:
         model_id: str,
         store: ResearchStore,
         montage_slices: int = 6,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 2048,
         device: str = "auto",
         enable_thinking: bool = True,
     ):
@@ -249,9 +320,13 @@ class QwenStructuredPlanner:
         # value: any vision-language checkpoint can be swapped in without a code
         # change, and bf16 is used on GPU.
         try:
-            from transformers import AutoModelForImageTextToText as _AutoVL
-        except ImportError:  # older transformers
-            from transformers import AutoModelForVision2Seq as _AutoVL
+            # Qwen3.5's current Transformers integration is registered here.
+            from transformers import AutoModelForMultimodalLM as _AutoVL
+        except ImportError:
+            try:
+                from transformers import AutoModelForImageTextToText as _AutoVL
+            except ImportError:  # older transformers
+                from transformers import AutoModelForVision2Seq as _AutoVL
         self.model = _AutoVL.from_pretrained(
             self.model_id,
             torch_dtype=dtype,
@@ -272,6 +347,8 @@ class QwenStructuredPlanner:
         step: int,
         observations: list[ToolObservation],
         history: list[dict] | None = None,
+        context: dict | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> PlannerDecision:
         from .imaging import grounding_views, load_volume
 
@@ -292,6 +369,8 @@ class QwenStructuredPlanner:
                 for item in (history or [])[-12:]
             ],
             "observations": [item.model_dump(mode="json") for item in observations],
+            "turn_context": context or {},
+            "artifact_inventory": self.store.artifact_inventory(case_id),
             "required_schema": schema,
         }
         content: list[dict[str, Any]] = [
@@ -307,19 +386,7 @@ class QwenStructuredPlanner:
                     {"type": "image", "image": image},
                 ]
             )
-        for artifact in case.artifacts[-8:]:
-            if artifact.kind == "overlay":
-                try:
-                    from PIL import Image
-
-                    content.extend(
-                        [
-                            {"type": "text", "text": f"Prior mask evidence: {artifact.label}"},
-                            {"type": "image", "image": Image.open(self.store.artifact_path(artifact))},
-                        ]
-                    )
-                except Exception:
-                    continue
+        self._append_artifact_views(content, case, volume, context)
         content.append(
             {"type": "text", "text": json.dumps(state, ensure_ascii=False, default=str)}
         )
@@ -328,15 +395,27 @@ class QwenStructuredPlanner:
             {"role": "user", "content": content},
         ]
         last_error = ""
-        for _ in range(2):
-            raw = self._generate(messages)
+        collected_reasoning: list[str] = []
+        for attempt in range(2):
+            parser = ThinkingDeltaParser(on_thinking_delta)
+            raw = self._generate(
+                messages,
+                on_text_delta=parser.feed,
+                # Preserve thinking on the first attempt. If it consumed the
+                # whole token budget before JSON, retry schema repair without a
+                # second long thought while retaining/displaying the first.
+                enable_thinking=self.enable_thinking if attempt == 0 else False,
+            )
             reasoning, payload = split_thinking(raw)
+            if reasoning:
+                collected_reasoning.append(reasoning)
             try:
                 decision = PlannerDecision.model_validate(self._decode_object(payload or raw))
                 # The model must not set these; reasoning comes from its own
                 # thinking channel, and gates are deterministic.
                 decision.gate = None
-                decision.thinking = reasoning or None
+                decision.workflow_stage = None
+                decision.thinking = "\n\n".join(collected_reasoning) or None
                 return decision
             except Exception as exc:
                 last_error = str(exc)
@@ -357,7 +436,9 @@ class QwenStructuredPlanner:
         case_id: str,
         question: str,
         history: list[dict] | None = None,
-    ) -> str:
+        context: dict | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
+    ) -> PlannerAnswer:
         """Answer a descriptive question about the image, in prose.
 
         This is a separate path from decide(): a question about what the scan
@@ -379,6 +460,7 @@ class QwenStructuredPlanner:
                 {"type": "text", "text": label},
                 {"type": "image", "image": image},
             ])
+        self._append_artifact_views(content, case, volume, context)
         if contours:
             content.append(
                 {
@@ -393,14 +475,119 @@ class QwenStructuredPlanner:
                 content.append({"type": "text", "text": f"{role}: {text}"})
         content.append({"type": "text", "text": f"Question: {question}"})
 
+        messages = [
+            {"role": "system", "content": VQA_SYSTEM},
+            {"role": "user", "content": content},
+        ]
+        parser = ThinkingDeltaParser(on_thinking_delta)
         raw = self._generate(
-            [
-                {"role": "system", "content": VQA_SYSTEM},
-                {"role": "user", "content": content},
-            ]
+            messages,
+            on_text_delta=parser.feed,
+            enable_thinking=self.enable_thinking,
         )
-        _, prose = split_thinking(raw)
-        return (prose or raw).strip()
+        reasoning, prose = split_thinking(raw)
+        if not prose and reasoning:
+            prose = self._generate(messages, enable_thinking=False)
+        return PlannerAnswer(
+            text=(prose or raw).strip(),
+            thinking=reasoning or None,
+        )
+
+    def _append_artifact_views(self, content, case, volume, context: dict | None) -> None:
+        """Attach only explicitly referenced/visible case artifacts to the VLM."""
+
+        from .imaging import load_mask, mask_grounding_views
+
+        ordered_ids = self._artifact_view_ids(case, context)
+        by_id = {item.artifact_id: item for item in case.artifacts}
+        for artifact_id in ordered_ids:
+            artifact = by_id.get(artifact_id)
+            if artifact is None:
+                continue
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Referenced artifact id={artifact.artifact_id}, "
+                        f"label={artifact.label}, kind={artifact.kind}"
+                    ),
+                }
+            )
+            try:
+                if artifact.kind in {"mask", "contour"}:
+                    mask = load_mask(self.store.artifact_path(artifact), volume)
+                    for label, image in mask_grounding_views(
+                        volume.data, mask, min(3, self.montage_slices)
+                    ):
+                        content.extend(
+                            [
+                                {
+                                    "type": "text",
+                                    "text": f"{artifact.label} ({artifact.artifact_id}), {label}",
+                                },
+                                {"type": "image", "image": image},
+                            ]
+                        )
+                elif artifact.kind == "overlay":
+                    from PIL import Image
+
+                    content.append(
+                        {
+                            "type": "image",
+                            "image": Image.open(self.store.artifact_path(artifact)),
+                        }
+                    )
+            except Exception:
+                continue
+
+    @staticmethod
+    def _artifact_view_ids(case, context: dict | None, limit: int = 8) -> list[str]:
+        """Prioritize the exact masks named in a turn over ambient visibility.
+
+        A full OAR viewer can contain 15–20 visible masks. Named targets,
+        selected IDs, and explicit references are the semantic context; ambient
+        visible masks are only a fallback when none of those resolves.
+        """
+
+        planner_context = context or {}
+        message_context = planner_context.get("message_context") or planner_context
+        target_names = {
+            " ".join(str(item).casefold().split())
+            for item in ((planner_context.get("intent") or {}).get("targets") or [])
+            if str(item).strip()
+        }
+        target_ids: list[str] = []
+        if target_names:
+            superseded = {
+                str(artifact.metadata.get("derived_from"))
+                for artifact in case.artifacts
+                if getattr(artifact, "metadata", {}).get("derived_from")
+            }
+            matched_labels: set[str] = set()
+            for artifact in reversed(case.artifacts):
+                if artifact.kind not in {"mask", "contour"}:
+                    continue
+                label = " ".join(artifact.label.casefold().split())
+                if (
+                    label in target_names
+                    and label not in matched_labels
+                    and artifact.artifact_id not in superseded
+                ):
+                    target_ids.append(artifact.artifact_id)
+                    matched_labels.add(label)
+
+        explicit = [
+            message_context.get("selected_mask_id"),
+            *(message_context.get("referenced_artifact_ids") or []),
+            *target_ids,
+        ]
+        resolved = [item for item in explicit if item]
+        ambient = (
+            []
+            if resolved or target_names
+            else list(message_context.get("visible_mask_ids") or [])
+        )
+        return list(dict.fromkeys([*resolved, *ambient]))[:limit]
 
     @staticmethod
     def _decode_object(text: str) -> dict:
@@ -416,16 +603,24 @@ class QwenStructuredPlanner:
                 return value
         raise ValueError("no JSON object in planner response")
 
-    def _generate(self, messages: list[dict]) -> str:
+    def _generate(
+        self,
+        messages: list[dict],
+        on_text_delta: Callable[[str], None] | None = None,
+        enable_thinking: bool | None = None,
+    ) -> str:
         import torch
         from qwen_vl_utils import process_vision_info
+        from transformers import TextIteratorStreamer
+
+        thinking = self.enable_thinking if enable_thinking is None else enable_thinking
 
         try:
             prompt = self.processor.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=self.enable_thinking,
+                enable_thinking=thinking,
             )
         except TypeError:
             # Chat templates without a thinking switch ignore the argument.
@@ -436,11 +631,35 @@ class QwenStructuredPlanner:
         inputs = self.processor(
             text=[prompt], images=images, videos=videos, padding=True, return_tensors="pt"
         ).to(self.model.device)
-        with torch.inference_mode():
-            generated = self.model.generate(
-                **inputs, max_new_tokens=self.max_new_tokens, do_sample=False
-            )
-        trimmed = generated[:, inputs.input_ids.shape[1] :]
-        return self.processor.batch_decode(
-            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0].strip()
+        streamer = TextIteratorStreamer(
+            self.processor.tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        errors: list[BaseException] = []
+
+        def generate() -> None:
+            try:
+                with torch.inference_mode():
+                    self.model.generate(
+                        **inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=False,
+                        streamer=streamer,
+                    )
+            except BaseException as exc:  # surfaced on the caller thread below
+                errors.append(exc)
+                streamer.on_finalized_text("", stream_end=True)
+
+        worker = Thread(target=generate, name="segagent-qwen-generate", daemon=True)
+        worker.start()
+        chunks: list[str] = []
+        for chunk in streamer:
+            chunks.append(chunk)
+            if on_text_delta:
+                on_text_delta(chunk)
+        worker.join()
+        if errors:
+            raise RuntimeError(f"model generation failed: {errors[0]}") from errors[0]
+        return "".join(chunks).strip()

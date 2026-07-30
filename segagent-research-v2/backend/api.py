@@ -6,14 +6,15 @@ from typing import Annotated
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from .a2a import router as a2a_router
 from .imaging import load_mask, load_volume
+from .schemas import MessageArtifactContext
 from .service import get_services
 
 
-class RunRequest(BaseModel):
+class RunRequest(MessageArtifactContext):
     question: str = Field(min_length=1, max_length=4000)
 
 
@@ -173,6 +174,24 @@ def upload_edited_mask(
         case = store.get_case(case_id)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Case not found") from exc
+    artifact_version = 1
+    if derived_from:
+        try:
+            parent, _ = store.get_artifact(case_id, derived_from)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="derived_from must identify a mask in this case",
+            ) from exc
+        if parent.kind not in {"mask", "contour"}:
+            raise HTTPException(
+                status_code=400,
+                detail="derived_from must identify a mask or contour",
+            )
+        try:
+            artifact_version = int(parent.metadata.get("artifact_version") or 1) + 1
+        except (TypeError, ValueError):
+            artifact_version = 2
     reference = load_volume(store.artifact_path(case.image))
     suffix = ".nii.gz" if name.lower().endswith(".nii.gz") else ".nii"
     artifact_id, path = store.allocate_artifact_path(case_id, suffix)
@@ -198,6 +217,7 @@ def upload_edited_mask(
             "source_model": "human_edit",
             "source_version": "1",
             "derived_from": derived_from,
+            "artifact_version": artifact_version,
             "target_type": target_type,
         },
     )
@@ -211,7 +231,15 @@ def send_message(case_id: str, request: RunRequest):
     the reply and continues that turn; otherwise a new turn starts.
     """
     try:
-        run_id, stream = get_services().workflow.send(case_id, request.question)
+        run_id, stream = get_services().workflow.send(
+            case_id,
+            request.question,
+            MessageArtifactContext(
+                referenced_artifact_ids=request.referenced_artifact_ids,
+                visible_mask_ids=request.visible_mask_ids,
+                selected_mask_id=request.selected_mask_id,
+            ),
+        )
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     response = StreamingResponse(ndjson(stream), media_type="application/x-ndjson")

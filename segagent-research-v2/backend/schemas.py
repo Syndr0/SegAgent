@@ -18,6 +18,13 @@ class Intent(str, Enum):
     QC = "qc"
     REPORT = "report"
     PROTOCOL = "protocol"
+    VQA = "vqa"
+    MASK_QUESTION = "mask_question"
+    AMBIGUOUS = "ambiguous"
+    MISSING_INPUT = "missing_input"
+    # Kept for stored checkpoints and third-party planners created before the
+    # intent split. New classification uses one of the three explicit values
+    # above instead of overloading QUESTION.
     QUESTION = "question"
 
 
@@ -42,6 +49,45 @@ class PlannerAction(str, Enum):
 class ChatRole(str, Enum):
     USER = "user"
     AGENT = "agent"
+
+
+class DialogueStage(str, Enum):
+    """Explicit workflow stage; never inferred from free-form planner prose."""
+
+    TUMOR_INITIAL = "tumor_initial"
+    TUMOR_BLIND = "tumor_blind"
+    TUMOR_NEIGHBOURS = "tumor_neighbours"
+    TUMOR_REFINE = "tumor_refine"
+    OAR_SITE = "oar_site"
+    OAR_PROTOCOL = "oar_protocol"
+    OAR_FULL = "oar_full"
+
+
+class MessageArtifactContext(BaseModel):
+    """Viewer context attached to one user turn.
+
+    IDs are validated against the case by ``WorkflowService``. Keeping IDs in
+    the message contract avoids resolving "this mask" from label substrings or
+    from whichever artifact happened to be created most recently.
+    """
+
+    referenced_artifact_ids: list[str] = Field(default_factory=list, max_length=64)
+    visible_mask_ids: list[str] = Field(default_factory=list, max_length=64)
+    selected_mask_id: str | None = None
+
+    @field_validator("referenced_artifact_ids", "visible_mask_ids")
+    @classmethod
+    def dedupe_artifact_ids(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(item.strip() for item in value if item.strip()))
+
+
+class PendingInteraction(BaseModel):
+    """Typed question suspended inside a turn."""
+
+    gate: str
+    question: str
+    stage: DialogueStage | None = None
+    proposed_site: str | None = None
 
 
 class ArtifactRef(BaseModel):
@@ -118,11 +164,14 @@ class StructureMeasurement(BaseModel):
     mean_intensity: float | None = None
     bbox_voxels: list[list[int]] | None = None
     centroid_voxels: list[float] | None = None
+    centroid_mm: list[float] | None = None
     mask: ArtifactRef | None = None
     overlays: list[ArtifactRef] = Field(default_factory=list)
 
 
 class SegmentResult(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     request: SegmentRequest
     model_name: str
     model_version: str
@@ -138,10 +187,36 @@ class Finding(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class MetricEvidence(BaseModel):
+    """One measured quantity with enough context to verify a later claim.
+
+    A bare float is ambiguous: 10 mL cannot ground a claim of HD95=10 mm or
+    "10 structures".  Metric, unit, provenance, and source artifacts therefore
+    travel with every QC/report value.
+    """
+
+    evidence_id: str
+    structure: str | None = None
+    canonical_roi: str | None = None
+    metric: str
+    value: float
+    unit: str
+    source: str
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
 class QCComparison(BaseModel):
     """An uploaded organ contour measured against an independent model contour."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     structure: str
+    canonical_roi: str | None = None
+    contour_artifact_id: str | None = None
+    model_mask: ArtifactRef | None = None
+    difference_overlays: list[ArtifactRef] = Field(default_factory=list)
+    model_name: str | None = None
+    model_version: str | None = None
     dice: float | None = None
     contour_volume_ml: float | None = None
     model_volume_ml: float | None = None
@@ -161,9 +236,25 @@ class QCTargetNote(BaseModel):
     """
 
     structure: str
+    canonical_roi: str | None = None
+    target_class: str | None = None
+    assessment_status: Literal["not_automatically_assessed"] = "not_automatically_assessed"
+    artifact_id: str | None = None
     volume_ml: float | None = None
     centroid_voxels: list[float] | None = None
+    centroid_mm: list[float] | None = None
     near: list[str] = Field(default_factory=list)
+    near_surface_mm: dict[str, float] = Field(default_factory=dict)
+
+
+class ProtocolApplicability(BaseModel):
+    """Whether a protocol list can be applied to this case and on what basis."""
+
+    status: Literal["applicable", "partially_applicable", "not_assessed"]
+    reason: str
+    source_status: Literal["institution_approved", "research_seed", "unknown"] = "unknown"
+    excluded: list[str] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
 
 
 class QCCompleteness(BaseModel):
@@ -173,7 +264,11 @@ class QCCompleteness(BaseModel):
     expected: list[str] = Field(default_factory=list)
     present: list[str] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
+    unmatched_contours: list[str] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
+    source: str | None = None
+    source_version: str | None = None
+    applicability: ProtocolApplicability | None = None
 
 
 class QCReport(BaseModel):
@@ -182,12 +277,55 @@ class QCReport(BaseModel):
     targets: list[QCTargetNote] = Field(default_factory=list)
     completeness: QCCompleteness | None = None
     summary: dict[str, int] = Field(default_factory=dict)
+    metric_evidence: list[MetricEvidence] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ReportReadiness(BaseModel):
+    """Deterministic precondition check for structure-based reports."""
+
+    scope: Literal["comprehensive", "available", "oar", "target"] = "comprehensive"
+    ready: bool
+    organ_count: int = 0
+    target_count: int = 0
+    missing_inputs: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class ReportStructureEvidence(BaseModel):
+    """Measured structure admitted to a report, tied to one concrete artifact."""
+
+    structure: str
+    canonical_roi: str
+    role: Literal["organ", "target"]
+    assessment_status: Literal["measured", "not_automatically_assessed"]
+    artifact_id: str
+    source: str
+    volume_ml: float | None = None
+    centroid_mm: list[float] | None = None
+    near_surface_mm: dict[str, float] = Field(default_factory=dict)
+
+
+class ReportEvidenceBundle(BaseModel):
+    """Deterministic measurements supplied to report prose generation."""
+
+    case_id: str
+    readiness: ReportReadiness
+    structures: list[ReportStructureEvidence] = Field(default_factory=list)
+    metric_evidence: list[MetricEvidence] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
 class ToolObservation(BaseModel):
     observation_id: str
-    tool: Literal["lookup_protocol", "segment", "inspect_mask", "run_qc", "evidence_critic"]
+    tool: Literal[
+        "lookup_protocol",
+        "segment",
+        "inspect_mask",
+        "run_qc",
+        "build_report_evidence",
+        "evidence_critic",
+    ]
     summary: str
     data: dict[str, Any]
     evidence_ids: list[str] = Field(default_factory=list)
@@ -207,6 +345,8 @@ class PlannerDecision(BaseModel):
     # The model's own reasoning, captured from its thinking channel rather than
     # requested inside the JSON. Displayed to the user; never used as evidence.
     thinking: str | None = None
+    # Safety-relevant workflow stage, assigned only by deterministic code.
+    workflow_stage: DialogueStage | None = None
 
     @field_validator("structures")
     @classmethod
@@ -228,6 +368,13 @@ class PlannerDecision(BaseModel):
         return self
 
 
+class PlannerAnswer(BaseModel):
+    """Prose response plus the model's separately displayed thinking channel."""
+
+    text: str
+    thinking: str | None = None
+
+
 class RunEvent(BaseModel):
     event_id: str
     run_id: str
@@ -236,7 +383,12 @@ class RunEvent(BaseModel):
     type: Literal[
         "run_started",
         "planner_decision",
+        "reasoning_summary",
+        "thinking_delta",
         "thinking",
+        "phase_started",
+        "phase_completed",
+        "phase_failed",
         "tool_started",
         "observation",
         "artifact",
@@ -293,6 +445,8 @@ class ConversationRecord(BaseModel):
     # Set while the agent has asked something and is waiting for the user.
     pending_question: str | None = None
     pending_run_id: str | None = None
+    pending_gate: str | None = None
+    pending_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentCardSkill(BaseModel):
@@ -331,6 +485,7 @@ class EvidenceRecord(BaseModel):
     model_name: str | None = None
     model_version: str | None = None
     values: dict[str, float] = Field(default_factory=dict)
+    metrics: list[MetricEvidence] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
     derived_from: str | None = None

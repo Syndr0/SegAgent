@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from backend.schemas import EvidenceRecord
+from backend.schemas import EvidenceRecord, MetricEvidence, ToolObservation
+from backend.tools import EvidenceCritic
 from backend.verifier import GroundingVerifier
 
 
@@ -42,6 +43,44 @@ class GroundingVerifierTests(unittest.TestCase):
         rec = seg_record({"dice": 0.823})
         self.assertEqual(self.verifier.verify("Dice 0.823 vs the expert.", [rec]), [])
 
+    def test_same_number_with_wrong_metric_and_unit_is_rejected(self) -> None:
+        rec = EvidenceRecord(
+            record_id="evidence_qc",
+            tool="run_qc",
+            metrics=[
+                MetricEvidence(
+                    evidence_id="metric_volume",
+                    structure="left kidney",
+                    metric="volume",
+                    value=10.0,
+                    unit="mL",
+                    source="uploaded contour",
+                    artifact_ids=["artifact_000000000000"],
+                )
+            ],
+        )
+        hd95 = self.verifier.verify("HD95 is 10 mm.", [rec])
+        count = self.verifier.verify("There are 10 structures.", [rec])
+        self.assertTrue(any(f.check == "numeric_grounding" for f in hd95))
+        self.assertTrue(any(f.check == "numeric_grounding" for f in count))
+
+    def test_matching_metric_and_convertible_unit_pass(self) -> None:
+        rec = EvidenceRecord(
+            record_id="evidence_qc",
+            tool="run_qc",
+            metrics=[
+                MetricEvidence(
+                    evidence_id="metric_hd95",
+                    metric="hd95",
+                    value=10.0,
+                    unit="mm",
+                    source="comparison",
+                )
+            ],
+        )
+        self.assertEqual(self.verifier.verify("HD95 is 10 mm.", [rec]), [])
+        self.assertEqual(self.verifier.verify("HD95 is 1 cm.", [rec]), [])
+
     def test_unsupported_citation_flagged(self) -> None:
         rec = seg_record({"volume_ml": 10.0}, citations=["[Local Atlas v2]"])
         ok = self.verifier.verify("Per [Local Atlas v2] the value is 10.0.", [rec])
@@ -57,7 +96,7 @@ class GroundingVerifierTests(unittest.TestCase):
         # Visual question answering has no tool evidence by design; a purely
         # descriptive reply must not be flagged.
         findings = self.verifier.verify(
-            "This is a chest CT; both lungs and the mediastinum are visible.", []
+            "This is a 3D chest CT; both lungs and the mediastinum are visible.", []
         )
         self.assertEqual(findings, [])
 
@@ -79,6 +118,99 @@ class GroundingVerifierTests(unittest.TestCase):
         rec = seg_record({"volume_ml": 26.606})
         findings = self.verifier.verify("Per [RTOG 1016] this is fine.", [rec])
         self.assertTrue(any(f.check == "citation_grounding" for f in findings))
+
+
+class EvidenceCriticQCTests(unittest.TestCase):
+    def test_world_centroid_is_admitted_with_mm_units(self) -> None:
+        observation = ToolObservation(
+            observation_id="observation_000000000002",
+            tool="inspect_mask",
+            summary="Measured mask",
+            data={
+                "segment_result": {
+                    "measurements": [
+                        {
+                            "structure": "left eye",
+                            "found": True,
+                            "voxels": 20,
+                            "centroid_voxels": [3.0, 4.0, 5.0],
+                            "centroid_mm": [30.0, 40.0, 50.0],
+                        }
+                    ]
+                }
+            },
+        )
+        critic = EvidenceCritic()
+        findings = critic.review(
+            "The left-eye world centroid is 30.0, 40.0, 50.0 mm.",
+            [observation],
+        )
+        self.assertEqual(findings, [])
+
+    def test_qc_report_metrics_and_source_are_admitted(self) -> None:
+        observation = ToolObservation(
+            observation_id="observation_000000000000",
+            tool="run_qc",
+            summary="QC",
+            data={
+                "qc_report": {
+                    "metric_evidence": [
+                        {
+                            "evidence_id": "qc:left_kidney:hd95",
+                            "structure": "left kidney",
+                            "canonical_roi": "left kidney",
+                            "metric": "hd95",
+                            "value": 3.2,
+                            "unit": "mm",
+                            "source": "uploaded contour vs VoxTell",
+                            "artifact_ids": ["artifact_000000000000"],
+                        }
+                    ],
+                    "completeness": {
+                        "citations": ["[Approved protocol v3]"],
+                        "source": "Institution-approved protocol v3",
+                    },
+                }
+            },
+            evidence_ids=["artifact_000000000000"],
+        )
+        critic = EvidenceCritic()
+        findings = critic.review(
+            "Left kidney HD95 is 3.2 mm per [Approved protocol v3].",
+            [observation],
+        )
+        self.assertEqual(findings, [])
+        record = critic._record(observation)
+        self.assertEqual(record.metrics[0].unit, "mm")
+        self.assertIn("artifact_000000000000", record.artifact_ids)
+
+    def test_report_bundle_metrics_are_admitted(self) -> None:
+        observation = ToolObservation(
+            observation_id="observation_000000000001",
+            tool="build_report_evidence",
+            summary="Report evidence",
+            data={
+                "report_evidence": {
+                    "metric_evidence": [
+                        {
+                            "evidence_id": "report:gtvp:volume",
+                            "structure": "GTVp",
+                            "canonical_roi": "gtvp",
+                            "metric": "volume",
+                            "value": 12.4,
+                            "unit": "mL",
+                            "source": "uploaded target contour",
+                            "artifact_ids": ["artifact_000000000001"],
+                        }
+                    ]
+                }
+            },
+            evidence_ids=["artifact_000000000001"],
+        )
+        record = EvidenceCritic._record(observation)
+        self.assertEqual(record.values["report0_volume"], 12.4)
+        self.assertEqual(record.metrics[0].source, "uploaded target contour")
+
 
 if __name__ == "__main__":
     unittest.main()

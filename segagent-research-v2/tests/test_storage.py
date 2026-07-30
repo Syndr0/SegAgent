@@ -58,6 +58,42 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(store.artifact_path(contour).suffix, ".nii")
             self.assertEqual(contour.media_type, "application/octet-stream")
 
+    def test_artifact_inventory_marks_edited_source_as_superseded(self) -> None:
+        with TemporaryDirectory() as temp:
+            store = ResearchStore(Path(temp))
+            case = store.create_case("image.nii.gz", BytesIO(b"image"))
+            source_id, source_path = store.allocate_artifact_path(case.case_id, ".nii.gz")
+            source_path.write_bytes(b"source")
+            source = store.register_artifact(
+                case.case_id,
+                source_id,
+                source_path,
+                kind="mask",
+                label="left kidney",
+                media_type="application/gzip",
+                metadata={"source_model": "fake", "source_version": "1"},
+            )
+            edit_id, edit_path = store.allocate_artifact_path(case.case_id, ".nii.gz")
+            edit_path.write_bytes(b"edit")
+            edit = store.register_artifact(
+                case.case_id,
+                edit_id,
+                edit_path,
+                kind="mask",
+                label="left kidney",
+                media_type="application/gzip",
+                metadata={"source_model": "human_edit", "derived_from": source.artifact_id},
+            )
+
+            inventory = {
+                item["artifact_id"]: item
+                for item in store.artifact_inventory(case.case_id)
+            }
+            self.assertFalse(inventory[source.artifact_id]["active"])
+            self.assertFalse(inventory[source.artifact_id]["latest"])
+            self.assertTrue(inventory[edit.artifact_id]["active"])
+            self.assertTrue(inventory[edit.artifact_id]["latest"])
+
     def test_contour_batch_rolls_back_when_a_file_is_empty(self) -> None:
         with TemporaryDirectory() as temp:
             store = ResearchStore(Path(temp))

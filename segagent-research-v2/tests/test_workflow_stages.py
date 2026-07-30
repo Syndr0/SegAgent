@@ -18,7 +18,9 @@ from backend.dialogue import (
     STAGE_TUMOR_REFINE,
     build_tumor_prompt,
     forced_structures,
+    required_workflow_decision,
 )
+from backend.schemas import PlannerAction
 
 PROTOCOL = ["brainstem", "spinal cord", "left parotid gland", "larynx", "mandible"]
 
@@ -56,6 +58,27 @@ class OarStageTests(unittest.TestCase):
         state = {"intent": {"intent": "oar"}, "answers": {}}
         self.assertIsNone(forced_structures(state, [], []))
 
+    def test_confirmed_site_forces_lookup_then_one_full_batch(self) -> None:
+        state = {"intent": {"intent": "oar", "site": "Thorax"}, "answers": {}}
+        lookup = required_workflow_decision(state, [], [], PROTOCOL)
+        self.assertEqual(lookup.action, PlannerAction.LOOKUP_PROTOCOL)
+        protocol_observation = {
+            "tool": "lookup_protocol",
+            "data": {"matched": True, "oars": PROTOCOL},
+        }
+        batch = required_workflow_decision(
+            state, PROTOCOL, [protocol_observation], PROTOCOL
+        )
+        self.assertEqual(batch.action, PlannerAction.SEGMENT)
+        self.assertEqual(batch.structures, PROTOCOL)
+
+
+class QcStageTests(unittest.TestCase):
+    def test_qc_intent_forces_qc_before_planner_prose(self) -> None:
+        state = {"intent": {"intent": "qc"}, "answers": {}}
+        decision = required_workflow_decision(state, [], [], PROTOCOL)
+        self.assertEqual(decision.action, PlannerAction.RUN_QC)
+
 
 class TumorStageTests(unittest.TestCase):
     def test_blind_attempt_uses_the_fixed_prompt(self) -> None:
@@ -65,12 +88,12 @@ class TumorStageTests(unittest.TestCase):
 
     def test_after_confirmation_neighbouring_organs_are_contoured(self) -> None:
         state = {
-            "intent": {"intent": "gtv"},
+            "intent": {"intent": "gtv", "targets": ["larynx"]},
             "answers": {"gtv_blind_attempt": True, "gtv_first_mask": True,
                         "gtv_location_confirmed": True},
         }
         structures, stage = forced_structures(state, PROTOCOL, [])
-        self.assertEqual(structures, PROTOCOL)
+        self.assertEqual(structures, ["larynx"])
         self.assertEqual(stage, STAGE_TUMOR_NEIGHBOURS)
 
     def test_after_neighbours_the_target_is_re_prompted_spatially(self) -> None:

@@ -2,6 +2,7 @@ import type {
   ArtifactRef,
   CaseRecord,
   ConversationHistory,
+  MessageContext,
   RunEvent,
   RunHistory,
 } from './types';
@@ -11,12 +12,18 @@ export const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 const RUN_EVENT_TYPES = new Set<RunEvent['type']>([
   'run_started',
   'planner_decision',
+  'thinking_delta',
   'thinking',
+  'reasoning_summary',
+  'phase_started',
+  'phase_completed',
+  'phase_failed',
   'tool_started',
   'observation',
   'artifact',
   'question_pending',
   'reply_recorded',
+  'answer_delta',
   'answer',
   'error',
   'run_completed',
@@ -113,19 +120,21 @@ export async function readEventStream(
   if (buffer.trim()) onEvent(parseRunEvent(buffer));
 }
 
-/** Send one conversational turn. The server decides whether this opens a new
- *  turn or answers a question the agent is waiting on. */
+/** Send one conversational turn. Viewer artifact IDs travel with the message,
+ *  so references such as "this contour" resolve to explicit case-owned masks.
+ *  The server decides whether this opens a new turn or answers a pending one. */
 export async function sendMessage(
   caseId: string,
   question: string,
   onEvent: (event: RunEvent) => void,
   onRunId: (runId: string) => void,
   signal?: AbortSignal,
+  context: MessageContext = {},
 ): Promise<string> {
   const response = await fetch(`${API}/api/cases/${caseId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, ...context }),
     signal,
   });
   const runId = response.headers.get('X-Run-Id') || '';

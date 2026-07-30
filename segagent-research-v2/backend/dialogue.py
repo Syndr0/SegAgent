@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 
-from .schemas import Intent, PlannerAction, PlannerDecision
+from .intent import match_canonical_terms
+from .schemas import DialogueStage, Intent, PlannerAction, PlannerDecision
 
 """Deterministic dialogue rules for the tumor and OAR workflows.
 
@@ -29,7 +30,8 @@ POSITION = (
 SIZE = re.compile(r"\d+\s*(?:mm|cm|millimet|centimet|毫米|厘米)", re.IGNORECASE)
 
 AFFIRMATIVE = (
-    "yes", "yeah", "correct", "right", "looks right", "that's it", "thats it",
+    "yes", "yeah", "correct", "that's right", "that is right", "looks right",
+    "that's it", "thats it",
     "confirm", "confirmed", "ok", "okay", "good", "对", "是", "正确", "没错", "确认",
 )
 NEGATIVE = (
@@ -39,6 +41,10 @@ NEGATIVE = (
 UNKNOWN = (
     "don't know", "dont know", "do not know", "not sure", "unsure", "no idea",
     "can't tell", "cannot tell", "unknown", "不知道", "不确定", "说不清",
+)
+MASK_MEASUREMENT_TERMS = (
+    "how big", "how large", "volume", "size", "measure", "measurement", "voxel",
+    "centroid", "bounding box", "bbox", "体积", "大小", "测量", "质心",
 )
 
 
@@ -137,7 +143,7 @@ def gtv_confirm_gate(state) -> PlannerDecision | None:
     the next prompt be enriched with neighbouring anatomy; rejecting stops the
     run rather than re-running a prompt that would return the same contour.
     """
-    if _intent_of(state) != Intent.GTV.value or _fired(state, "gtv_confirm"):
+    if _intent_of(state) != Intent.GTV.value:
         return None
     answers = _answers(state)
     # Only once a tumor mask actually exists: there is nothing to confirm before.
@@ -158,6 +164,31 @@ def gtv_confirm_gate(state) -> PlannerDecision | None:
     )
 
 
+def oar_site_gate(state) -> PlannerDecision | None:
+    """Request a treatment site before any protocol lookup or segmentation."""
+
+    if _intent_of(state) != Intent.OAR.value:
+        return None
+    intent_data = state.get("intent") or {}
+    answers = _answers(state)
+    if intent_data.get("targets"):
+        return None
+    if (intent_data.get("site") or answers.get("site") or "").strip():
+        return None
+    return PlannerDecision(
+        action=PlannerAction.ASK_USER,
+        rationale_summary="The OAR workflow is waiting for a confirmed treatment site.",
+        confidence=1.0,
+        user_message=(
+            "Which treatment site should I use for the organs-at-risk protocol "
+            "(for example, head and neck, thorax, upper abdomen, or pelvis)? "
+            "I will retrieve that protocol and contour its complete OAR list in one batch."
+        ),
+        gate="oar_site",
+        workflow_stage=DialogueStage.OAR_SITE,
+    )
+
+
 def oar_site_guard(state, decision: PlannerDecision) -> PlannerDecision | None:
     """Block OAR contouring until the treatment site is confirmed.
 
@@ -165,26 +196,21 @@ def oar_site_guard(state, decision: PlannerDecision) -> PlannerDecision | None:
     guard only guarantees that nothing is contoured before the user agrees, so a
     confident but wrong guess cannot silently produce a whole OAR set.
     """
-    if decision.action != PlannerAction.SEGMENT:
-        return None
-    if _intent_of(state) != Intent.OAR.value or _fired(state, "oar_site"):
+    if _intent_of(state) != Intent.OAR.value:
         return None
     intent_data = state.get("intent") or {}
     if (intent_data.get("site") or "").strip() or _answers(state).get("site"):
         return None
     if intent_data.get("targets"):
         return None
-    return PlannerDecision(
-        action=PlannerAction.ASK_USER,
-        rationale_summary="OAR contouring requires a confirmed treatment site.",
-        confidence=1.0,
-        user_message=(
-            "Which treatment site should I use for the organs at risk — for example "
-            "head and neck, thorax, abdomen, or pelvis? Tell me the site (or correct "
-            "me if I proposed the wrong one) and I will contour that protocol's set."
-        ),
-        gate="oar_site",
-    )
+    if decision.action == PlannerAction.ASK_USER:
+        return decision.model_copy(
+            update={
+                "gate": "oar_site",
+                "workflow_stage": DialogueStage.OAR_SITE,
+            }
+        )
+    return oar_site_gate(state)
 
 
 def report_scope_gate(state, has_contours: bool) -> PlannerDecision | None:
@@ -195,16 +221,21 @@ def report_scope_gate(state, has_contours: bool) -> PlannerDecision | None:
     """
     if _intent_of(state) != Intent.REPORT.value or _fired(state, "report_scope"):
         return None
-    if has_contours:
+    readiness = state.get("report_readiness") or {}
+    if readiness.get("ready"):
         return None
+    if not readiness and has_contours:
+        return None
+    missing = list(readiness.get("missing_inputs") or [])
     return PlannerDecision(
         action=PlannerAction.ASK_USER,
-        rationale_summary="A report was requested but nothing is contoured yet.",
+        rationale_summary="The requested report scope is missing deterministic structure evidence.",
         confidence=1.0,
         user_message=(
-            "There are no contours on this case yet, so there is nothing to report on. "
-            "Shall I contour the organs at risk first (tell me the treatment site), or "
-            "would you rather name the structures you want included?"
+            "A comprehensive report needs both organ/OAR and target contours. "
+            f"Missing now: {', '.join(missing) or 'required contours'}. "
+            "Upload or request the missing contours, or reply “available” for a "
+            "report limited explicitly to structures already present."
         ),
         gate="report_scope",
     )
@@ -217,10 +248,7 @@ def question_gate(state) -> PlannerDecision | None:
     protocol lookup or a segmentation run. Routing this deterministically keeps
     the planner from turning a question into work the user did not ask for.
     """
-    if _intent_of(state) != Intent.QUESTION.value or _fired(state, "vqa"):
-        return None
-    intent_data = state.get("intent") or {}
-    if intent_data.get("targets"):
+    if _intent_of(state) not in {Intent.VQA.value} or _fired(state, "vqa"):
         return None
     return PlannerDecision(
         action=PlannerAction.ANSWER_QUESTION,
@@ -230,13 +258,135 @@ def question_gate(state) -> PlannerDecision | None:
     )
 
 
+def mask_question_gate(state) -> PlannerDecision | None:
+    """Route selected-mask follow-ups by artifact ID, never by pronoun guessing."""
+
+    if _intent_of(state) != Intent.MASK_QUESTION.value or _fired(state, "mask_question"):
+        return None
+    context = state.get("message_context") or {}
+    intent_data = state.get("intent") or {}
+    selected = context.get("selected_mask_id")
+    referenced = list(context.get("referenced_artifact_ids") or [])
+    visible = list(context.get("visible_mask_ids") or [])
+    targets = list(intent_data.get("targets") or [])
+    inventory = list(state.get("artifact_inventory") or [])
+    mask_ids = {
+        item.get("artifact_id")
+        for item in inventory
+        if item.get("kind") in {"mask", "contour"} and item.get("active", True)
+    }
+    referenced_masks = [
+        artifact_id
+        for artifact_id in referenced
+        if not inventory or artifact_id in mask_ids
+    ]
+    exact_label_ids = [
+        item.get("artifact_id")
+        for item in inventory
+        if item.get("kind") in {"mask", "contour"}
+        and item.get("active", True)
+        and _norm(str(item.get("label") or "")) == _norm(state.get("question", ""))
+    ]
+    if selected:
+        measurement_structures = [selected]
+    elif targets:
+        measurement_structures = targets
+    elif len(exact_label_ids) == 1:
+        measurement_structures = exact_label_ids
+    elif len(referenced_masks) == 1:
+        measurement_structures = referenced_masks
+    elif len(visible) == 1:
+        measurement_structures = visible
+    else:
+        measurement_structures = []
+    wants_measurement = _has(_norm(state.get("question", "")), MASK_MEASUREMENT_TERMS)
+    if wants_measurement and measurement_structures:
+        return PlannerDecision(
+            action=PlannerAction.INSPECT_MASK,
+            rationale_summary="A quantitative follow-up refers to a case-owned mask.",
+            confidence=1.0,
+            structures=measurement_structures,
+            gate="mask_question",
+        )
+    if wants_measurement:
+        return PlannerDecision(
+            action=PlannerAction.ASK_USER,
+            rationale_summary="The quantitative mask question is not tied to one exact artifact.",
+            confidence=1.0,
+            user_message="Please select the one mask you want me to measure.",
+            gate="mask_reference",
+        )
+    if (
+        selected
+        or referenced_masks
+        or targets
+        or len(exact_label_ids) == 1
+        or len(visible) == 1
+    ):
+        return PlannerDecision(
+            action=PlannerAction.ANSWER_QUESTION,
+            rationale_summary="A visual follow-up refers to existing contour evidence.",
+            confidence=1.0,
+            gate="mask_question",
+        )
+    if len(visible) > 1:
+        return PlannerDecision(
+            action=PlannerAction.ASK_USER,
+            rationale_summary="The visual mask question is ambiguous across multiple visible masks.",
+            confidence=1.0,
+            user_message=(
+                "Several masks are visible. Please name the contour you mean "
+                "or leave only that mask visible before asking again."
+            ),
+            gate="mask_reference",
+        )
+    return PlannerDecision(
+        action=PlannerAction.ASK_USER,
+        rationale_summary="The mask follow-up did not identify a case artifact.",
+        confidence=1.0,
+        user_message="Please select or reference the mask you want me to inspect.",
+        gate="mask_reference",
+    )
+
+
+def abstention_gate(state) -> PlannerDecision | None:
+    """Turn explicit classifier abstentions into a focused clarification."""
+
+    intent = _intent_of(state)
+    if intent == Intent.MISSING_INPUT.value and not _fired(state, "missing_input"):
+        return PlannerDecision(
+            action=PlannerAction.ASK_USER,
+            rationale_summary="The requested operation is missing required case input.",
+            confidence=1.0,
+            user_message=(
+                "This request needs uploaded contour masks. Please upload the contours, "
+                "then tell me to run the contour quality check again."
+            ),
+            gate="missing_input",
+        )
+    if intent == Intent.AMBIGUOUS.value and not _fired(state, "clarify_intent"):
+        return PlannerDecision(
+            action=PlannerAction.ASK_USER,
+            rationale_summary="The request does not identify one safe workflow.",
+            confidence=1.0,
+            user_message=(
+                "Please clarify whether you want a tumor target, a named organ, "
+                "an organs-at-risk protocol, contour QC, or a description of the image."
+            ),
+            gate="clarify_intent",
+        )
+    return None
+
+
 def pre_plan_gate(state, organ_names=(), has_contours: bool = False) -> PlannerDecision | None:
     """Deterministic question that must be asked before the model plans."""
     return (
         gtv_confirm_gate(state)
         or gtv_spatial_gate(state, organ_names)
         or report_scope_gate(state, has_contours)
+        or mask_question_gate(state)
         or question_gate(state)
+        or abstention_gate(state)
     )
 
 
@@ -246,11 +396,13 @@ TUMOR_PROMPT = "tumor"
 # can branch on them safely (a stage decides the target type and which marker is
 # recorded, which is too load-bearing for string prefixes).
 STAGE_TUMOR_BLIND = "tumor_blind"
+STAGE_TUMOR_INITIAL = "tumor_initial"
 STAGE_TUMOR_NEIGHBOURS = "tumor_neighbours"
 STAGE_TUMOR_REFINE = "tumor_refine"
 STAGE_OAR_FULL = "oar_full"
 
 STAGE_LABELS = {
+    STAGE_TUMOR_INITIAL: "first target contour from the supplied spatial description",
     STAGE_TUMOR_BLIND: "first attempt with a fixed prompt",
     STAGE_TUMOR_NEIGHBOURS: "contouring neighbouring organs to locate the target",
     STAGE_TUMOR_REFINE: "re-contouring the target with a spatial prompt",
@@ -259,11 +411,175 @@ STAGE_LABELS = {
 
 # Which answer marker a completed stage records.
 STAGE_MARKERS = {
+    STAGE_TUMOR_INITIAL: "gtv_first_mask",
     STAGE_TUMOR_BLIND: "gtv_first_mask",
     STAGE_TUMOR_NEIGHBOURS: "gtv_neighbours",
     STAGE_TUMOR_REFINE: "gtv_refined",
     STAGE_OAR_FULL: "oar_contoured",
 }
+
+
+def _has_tool(observations, tool: str) -> bool:
+    return any(item.get("tool") == tool for item in observations or [])
+
+
+def _neighbour_names(state, organ_names=()) -> list[str]:
+    answers = _answers(state)
+    supplied = list(answers.get("gtv_neighbour_names") or [])
+    if supplied:
+        return list(dict.fromkeys(supplied))
+    intent_data = state.get("intent") or {}
+    named = list(intent_data.get("targets") or [])
+    description = " ".join(
+        filter(
+            None,
+            [
+                intent_data.get("source_description"),
+                answers.get("gtv_description"),
+            ],
+        )
+    )
+    named.extend(match_canonical_terms(description, organ_names))
+    return list(dict.fromkeys(named))
+
+
+def required_workflow_decision(
+    state,
+    protocol_oars=(),
+    observations=(),
+    organ_names=(),
+) -> PlannerDecision | None:
+    """Return the next mandatory FSM action, if one exists.
+
+    The LLM still explains and summarizes, but it cannot skip site confirmation,
+    protocol retrieval, a complete batched OAR segmentation, or a confirmed
+    tumor refinement stage.
+    """
+
+    intent = _intent_of(state)
+    answers = _answers(state)
+    intent_data = state.get("intent") or {}
+
+    if intent == Intent.QC.value:
+        if not _has_tool(observations, "run_qc"):
+            return PlannerDecision(
+                action=PlannerAction.RUN_QC,
+                rationale_summary="Run deterministic QC on the uploaded contour set.",
+                confidence=1.0,
+                site_query=intent_data.get("site"),
+            )
+        return None
+
+    if intent == Intent.ORGAN.value:
+        targets = list(intent_data.get("targets") or [])
+        if targets and not _has_tool(observations, "segment"):
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary="Contour the directly requested anatomical structures.",
+                confidence=1.0,
+                structures=targets,
+            )
+        return None
+
+    if intent == Intent.OAR.value:
+        targets = list(intent_data.get("targets") or [])
+        site = intent_data.get("site") or answers.get("site")
+        if targets and not answers.get("oar_contoured"):
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary="Contour the explicitly requested OAR structures in one batch.",
+                confidence=1.0,
+                structures=targets,
+                workflow_stage=DialogueStage.OAR_FULL,
+            )
+        if not site:
+            # Let the multimodal planner inspect the scan and propose a site.
+            # ``guard_decision`` converts every resulting action into a typed
+            # oar_site question, so no lookup/segmentation can escape.
+            return None
+        if not _has_tool(observations, "lookup_protocol"):
+            return PlannerDecision(
+                action=PlannerAction.LOOKUP_PROTOCOL,
+                rationale_summary="Retrieve the confirmed site's versioned OAR list.",
+                confidence=1.0,
+                site_query=str(site),
+                workflow_stage=DialogueStage.OAR_PROTOCOL,
+            )
+        if protocol_oars and not answers.get("oar_contoured"):
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary="Contour the protocol's complete OAR list in one model batch.",
+                confidence=1.0,
+                structures=list(protocol_oars),
+                workflow_stage=DialogueStage.OAR_FULL,
+            )
+        return None
+
+    if intent != Intent.GTV.value:
+        return None
+
+    if not answers.get("gtv_first_mask"):
+        if answers.get("gtv_blind_attempt"):
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary="Make the requested first target attempt with the fixed fallback prompt.",
+                confidence=1.0,
+                structures=[TUMOR_PROMPT],
+                workflow_stage=DialogueStage.TUMOR_BLIND,
+            )
+        description = (
+            answers.get("gtv_description")
+            or intent_data.get("source_description")
+            or state.get("question")
+            or ""
+        )
+        if has_spatial_detail(str(description), organ_names):
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary="Make the first target contour from the supplied spatial description.",
+                confidence=1.0,
+                structures=[str(description)],
+                workflow_stage=DialogueStage.TUMOR_INITIAL,
+            )
+        return None
+
+    if answers.get("gtv_rejected") or not answers.get("gtv_location_confirmed"):
+        return None
+
+    if not answers.get("gtv_neighbours"):
+        neighbours = _neighbour_names(state, organ_names)
+        if neighbours:
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary="Contour the named anatomical anchors before target refinement.",
+                confidence=1.0,
+                structures=neighbours,
+                workflow_stage=DialogueStage.TUMOR_NEIGHBOURS,
+            )
+        if answers.get("gtv_neighbours_skipped"):
+            return None
+        return PlannerDecision(
+            action=PlannerAction.ASK_USER,
+            rationale_summary="Target refinement needs at least one anatomical anchor.",
+            confidence=1.0,
+            user_message=(
+                "Which nearby organ or structure should anchor the refinement? "
+                "Name one or more, or say you are not sure to keep the first contour."
+            ),
+            gate="gtv_neighbours",
+        )
+
+    if not answers.get("gtv_refined"):
+        enriched = build_tumor_prompt(observations)
+        if enriched:
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary="Re-contour the target with measured spatial relations to its anchors.",
+                confidence=1.0,
+                structures=[enriched],
+                workflow_stage=DialogueStage.TUMOR_REFINE,
+            )
+    return None
 
 
 def _measurements(observations) -> list[dict]:
@@ -302,12 +618,12 @@ def build_tumor_prompt(observations) -> str | None:
     organs = organ_measurements(observations)
     if target is None or not organs:
         return None
-    point = target.get("centroid_voxels") or []
+    point = target.get("centroid_mm") or target.get("centroid_voxels") or []
     if len(point) < 3:
         return None
 
     def offset(row):
-        other = row.get("centroid_voxels") or []
+        other = row.get("centroid_mm") or row.get("centroid_voxels") or []
         if len(other) < 3:
             return None
         return [float(point[i]) - float(other[i]) for i in range(3)]
@@ -323,8 +639,9 @@ def build_tumor_prompt(observations) -> str | None:
         return None
     scored.sort(key=lambda item: item[0])
 
-    # Canonical volumes are RAS-oriented, so a larger index is further right (x),
-    # anterior (y) and superior (z).
+    # World centroids are RAS-oriented (with voxel centroids retained only as a
+    # backward-compatible fallback), so directions and distances use physical
+    # geometry rather than anisotropic raw voxel indices.
     def relation(delta) -> str | None:
         axis = max(range(3), key=lambda i: abs(delta[i]))
         if abs(delta[axis]) < 2.0:
@@ -364,11 +681,20 @@ def forced_structures(state, protocol_oars=(), observations=()) -> tuple[list[st
     answers = _answers(state)
 
     if intent == Intent.GTV.value:
+        if not answers.get("gtv_first_mask"):
+            description = (
+                answers.get("gtv_description")
+                or (state.get("intent") or {}).get("source_description")
+            )
+            if description and has_spatial_detail(description):
+                return [description], STAGE_TUMOR_INITIAL
         if answers.get("gtv_blind_attempt") and not answers.get("gtv_first_mask"):
             return [TUMOR_PROMPT], STAGE_TUMOR_BLIND
         if answers.get("gtv_location_confirmed"):
-            if not answers.get("gtv_neighbours") and protocol_oars:
-                return list(protocol_oars), STAGE_TUMOR_NEIGHBOURS
+            if not answers.get("gtv_neighbours"):
+                neighbours = _neighbour_names(state, protocol_oars)
+                if neighbours:
+                    return neighbours, STAGE_TUMOR_NEIGHBOURS
             if not answers.get("gtv_refined"):
                 enriched = build_tumor_prompt(observations)
                 if enriched:
@@ -386,7 +712,18 @@ def guard_decision(state, decision: PlannerDecision) -> PlannerDecision:
     return oar_site_guard(state, decision) or decision
 
 
-def apply_reply(state, gate: str, reply: str, organ_names=()) -> dict:
+def _resolve_site(reply: str, site_aliases=None) -> str | None:
+    aliases = site_aliases or {}
+    lowered = _norm(reply)
+    matches = [
+        (len(str(alias)), str(site))
+        for alias, site in aliases.items()
+        if _contains(lowered, str(alias).casefold())
+    ]
+    return max(matches, default=(0, None), key=lambda item: item[0])[1]
+
+
+def apply_reply(state, gate: str, reply: str, organ_names=(), site_aliases=None) -> dict:
     """Fold a reply to a gated question back into the run state.
 
     Returns the state update: what was answered, how the tumor prompt should be
@@ -399,9 +736,18 @@ def apply_reply(state, gate: str, reply: str, organ_names=()) -> dict:
     mood = reply_sentiment(reply)
 
     if gate == "oar_site":
-        answers["site"] = reply
-        intent_data["site"] = reply
-        update["intent"] = intent_data
+        proposed = answers.get("proposed_site")
+        resolved = _resolve_site(reply, site_aliases)
+        if mood == "yes" and proposed:
+            resolved = str(proposed)
+        if resolved:
+            answers["site"] = resolved
+            answers.pop("oar_site_unresolved", None)
+            intent_data["site"] = resolved
+            update["intent"] = intent_data
+        else:
+            answers.pop("proposed_site", None)
+            answers["oar_site_unresolved"] = True
 
     elif gate == "gtv_spatial":
         if mood == "unknown" or not has_spatial_detail(reply, organ_names):
@@ -417,10 +763,47 @@ def apply_reply(state, gate: str, reply: str, organ_names=()) -> dict:
             update["intent"] = intent_data
 
     elif gate == "gtv_confirm":
-        if mood == "no":
+        correction = has_spatial_detail(reply, organ_names)
+        if mood == "yes":
+            answers["gtv_location_confirmed"] = True
+            answers.pop("gtv_confirmation_uncertain", None)
+        elif correction:
+            # A correction is new target evidence, not a confirmation. Clear
+            # only the target-stage markers so the corrected prompt gets a new
+            # first attempt and a fresh confirmation.
+            described = " ".join(
+                filter(None, [intent_data.get("source_description"), reply])
+            ).strip()
+            intent_data["source_description"] = described
+            update["intent"] = intent_data
+            for key in (
+                "gtv_first_mask",
+                "gtv_location_confirmed",
+                "gtv_rejected",
+                "gtv_neighbours",
+                "gtv_refined",
+            ):
+                answers.pop(key, None)
+            answers["gtv_description"] = reply
+            answers["gtv_confirmation_uncertain"] = False
+        elif mood == "no":
             answers["gtv_rejected"] = True
         else:
-            answers["gtv_location_confirmed"] = True
+            # "I'm not sure" and unrelated prose are explicitly not consent.
+            answers["gtv_confirmation_uncertain"] = True
+
+    elif gate == "gtv_neighbours":
+        names = match_canonical_terms(reply, organ_names)
+        if names:
+            answers["gtv_neighbour_names"] = names
+        elif mood == "unknown":
+            answers["gtv_neighbours_skipped"] = True
+
+    elif gate == "report_scope":
+        lowered = _norm(reply)
+        if _has(lowered, ("available", "existing", "current", "already present", "现有", "已有")):
+            answers["report_scope"] = "available"
+            update["report_scope"] = "available"
 
     update["answers"] = answers
     return update

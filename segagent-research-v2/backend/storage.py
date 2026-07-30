@@ -140,6 +140,55 @@ class ResearchStore:
             raise FileNotFoundError("artifact not found")
         return ref, self.artifact_path(ref)
 
+    def artifact_inventory(self, case_id: str) -> list[dict]:
+        """Return a deterministic, case-owned mask/contour registry.
+
+        ``active`` means no newer artifact declares itself derived from this
+        artifact. ``latest`` additionally identifies the most recently
+        registered active artifact for the same exact label and role.
+        """
+
+        case = self.get_case(case_id)
+        artifacts = [
+            item for item in case.artifacts if item.kind in {"mask", "contour", "overlay"}
+        ]
+        superseded = {
+            str(item.metadata.get("derived_from"))
+            for item in artifacts
+            if item.metadata.get("derived_from")
+        }
+        latest_by_key: dict[tuple[str, str], str] = {}
+        for item in artifacts:
+            if item.artifact_id in superseded:
+                continue
+            role = str(item.metadata.get("target_type") or item.kind)
+            latest_by_key[(item.label.casefold(), role)] = item.artifact_id
+        return [
+            {
+                "artifact_id": item.artifact_id,
+                "label": item.label,
+                "kind": item.kind,
+                "role": str(item.metadata.get("target_type") or item.kind),
+                "source_model": item.metadata.get("source_model"),
+                "model_version": item.metadata.get("source_version"),
+                "artifact_version": item.metadata.get("artifact_version")
+                or item.metadata.get("source_version")
+                or "1",
+                "derived_from": item.metadata.get("derived_from"),
+                "active": item.artifact_id not in superseded,
+                "latest": (
+                    latest_by_key.get(
+                        (
+                            item.label.casefold(),
+                            str(item.metadata.get("target_type") or item.kind),
+                        )
+                    )
+                    == item.artifact_id
+                ),
+            }
+            for item in artifacts
+        ]
+
     def allocate_artifact_path(self, case_id: str, suffix: str) -> tuple[str, Path]:
         artifact_id = _id("artifact")
         suffix = suffix if suffix.startswith(".") else f".{suffix}"
