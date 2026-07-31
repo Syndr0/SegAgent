@@ -122,6 +122,7 @@ export default function App() {
   const [viewerReady, setViewerReady] = useState(false);
   const activeCaseId = useRef('');
   const requestController = useRef<AbortController | null>(null);
+  const sendController = useRef<AbortController | null>(null);
   const editFileRef = useRef<HTMLInputElement>(null);
   const editTarget = useRef<ViewerMask | null>(null);
 
@@ -202,7 +203,14 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  useEffect(() => () => requestController.current?.abort(), []);
+  useEffect(() => () => {
+    const activeRequest = requestController.current;
+    const activeSend = sendController.current;
+    requestController.current = null;
+    sendController.current = null;
+    activeSend?.abort();
+    if (activeRequest !== activeSend) activeRequest?.abort();
+  }, []);
 
   const addArtifact = (artifact: ArtifactRef) => {
     if (artifact.case_id !== activeCaseId.current) return;
@@ -241,7 +249,7 @@ export default function App() {
 
   const uploadImage = async (files: File[]) => {
     const file = files[0];
-    if (!file || busy !== 'idle') return;
+    if (!file || busy !== 'idle' || requestController.current) return;
     if (!isNifti(file)) {
       setError('Choose a NIfTI file ending in .nii or .nii.gz.');
       return;
@@ -261,13 +269,15 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      setBusy('idle');
+      if (requestController.current === controller) {
+        requestController.current = null;
+        setBusy('idle');
+      }
     }
   };
 
   const uploadContours = async (files: File[]) => {
-    if (!caseRecord || !files.length || busy !== 'idle') return;
+    if (!caseRecord || !files.length || busy !== 'idle' || requestController.current) return;
     const invalid = files.find(file => !isNifti(file));
     if (invalid) {
       setError(`${invalid.name} is not a .nii or .nii.gz file.`);
@@ -299,18 +309,30 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      setBusy('idle');
+      if (requestController.current === controller) {
+        requestController.current = null;
+        setBusy('idle');
+      }
     }
   };
 
   // One send action: the server continues a pending question or opens a new
   // turn, so the composer behaves like an ordinary chat box.
   const send = async () => {
-    if (!caseRecord || !viewerReady || !question.trim() || busy !== 'idle') return;
+    if (
+      sendController.current
+      || requestController.current
+      || !caseRecord
+      || !viewerReady
+      || !question.trim()
+      || busy !== 'idle'
+    ) return;
     const expectedCaseId = caseRecord.case_id;
     const text = question.trim();
     const controller = new AbortController();
+    // This ref is the synchronous single-flight lock. Unlike React state, it is
+    // visible to a second invocation before the next render commits.
+    sendController.current = controller;
     requestController.current = controller;
     setBusy('running');
     setQuestion('');
@@ -352,8 +374,16 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      setBusy('idle');
+      // A superseded request must never clear a newer request's controller or
+      // unlock its UI state.
+      if (
+        sendController.current === controller
+        && requestController.current === controller
+      ) {
+        sendController.current = null;
+        requestController.current = null;
+        setBusy('idle');
+      }
     }
   };
 
@@ -368,7 +398,7 @@ export default function App() {
   // no run pause, no approval gate.
   const uploadEdit = async (file: File) => {
     const target = editTarget.current;
-    if (!caseRecord || !target || busy !== 'idle') return;
+    if (!caseRecord || !target || busy !== 'idle' || requestController.current) return;
     if (!isNifti(file)) {
       setError('The edited contour must be a .nii or .nii.gz file.');
       return;
@@ -397,9 +427,11 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      editTarget.current = null;
-      setBusy('idle');
+      if (requestController.current === controller) {
+        requestController.current = null;
+        editTarget.current = null;
+        setBusy('idle');
+      }
     }
   };
 

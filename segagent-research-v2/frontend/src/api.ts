@@ -49,6 +49,28 @@ function parseRunEvent(line: string): RunEvent {
   return event as RunEvent;
 }
 
+function yieldForLivePaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== 'function') {
+    return new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+  return new Promise<void>(resolve => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      resolve();
+    };
+    // A background tab may suspend animation frames. Keep consuming the
+    // response in that case instead of stalling the model request indefinitely.
+    const fallback = setTimeout(finish, 50);
+    requestAnimationFrame(() => {
+      clearTimeout(fallback);
+      // Continue in the task after this frame has had a chance to paint.
+      setTimeout(finish, 0);
+    });
+  });
+}
+
 async function errorMessage(response: Response): Promise<string> {
   try {
     const payload: unknown = await response.json();
@@ -104,7 +126,9 @@ export async function readEventStream(
   if (!response.ok || !response.body) throw new Error(await errorMessage(response));
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const liveDeltaGroupSize = 4;
   let buffer = '';
+  let liveDeltasSincePaint = 0;
   for (;;) {
     const { done, value } = await reader.read();
     buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -112,12 +136,40 @@ export async function readEventStream(
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
-      if (line) onEvent(parseRunEvent(line));
+      if (line) {
+        const event = parseRunEvent(line);
+        const isLiveDelta = event.type === 'thinking_delta' || event.type === 'answer_delta';
+        if (liveDeltasSincePaint > 0 && !isLiveDelta) {
+          await yieldForLivePaint();
+          liveDeltasSincePaint = 0;
+        }
+        onEvent(event);
+        if (isLiveDelta) {
+          liveDeltasSincePaint += 1;
+          if (liveDeltasSincePaint >= liveDeltaGroupSize) {
+            // Bound each React update group even when a proxy coalesces many
+            // NDJSON events into one network chunk.
+            await yieldForLivePaint();
+            liveDeltasSincePaint = 0;
+          }
+        }
+      }
       newline = buffer.indexOf('\n');
+    }
+    if (liveDeltasSincePaint > 0) {
+      // Paint a partial group before waiting for more bytes.
+      await yieldForLivePaint();
+      liveDeltasSincePaint = 0;
     }
     if (done) break;
   }
-  if (buffer.trim()) onEvent(parseRunEvent(buffer));
+  if (buffer.trim()) {
+    const event = parseRunEvent(buffer);
+    onEvent(event);
+    if (event.type === 'thinking_delta' || event.type === 'answer_delta') {
+      await yieldForLivePaint();
+    }
+  }
 }
 
 /** Send one conversational turn. Viewer artifact IDs travel with the message,

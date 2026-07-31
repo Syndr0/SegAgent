@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import sqlite3
+import threading
 import uuid
 from inspect import signature
-from typing import Annotated, Iterator, TypedDict
+from typing import Annotated, Callable, Iterator, TypedDict
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -19,7 +21,11 @@ from .schemas import (
     PlannerAnswer,
     PlannerAction,
     PlannerDecision,
+    PromptCategory,
+    PromptNormalization,
+    PromptNormalizationBatch,
     RunEvent,
+    RunRecord,
     SegmentRequest,
     TargetType,
     TaskIntent,
@@ -28,8 +34,11 @@ from .schemas import (
 from .dialogue import (
     STAGE_LABELS,
     STAGE_MARKERS,
+    STAGE_OAR_FULL,
+    STAGE_TUMOR_BLIND,
     STAGE_TUMOR_NEIGHBOURS,
     STAGE_TUMOR_INITIAL,
+    STAGE_TUMOR_REFINE,
     apply_reply,
     forced_structures,
     guard_decision,
@@ -38,8 +47,16 @@ from .dialogue import (
     rejection_notice,
 )
 from .guards import request_signature
-from .intent import IntentClassifier
-from .prompts import build_prompts, clean_prompt, target_type_for
+from .intent import IntentClassifier, extract_open_target
+from .prompts import (
+    build_prompts,
+    clean_prompt,
+    dedupe_prompt_normalizations,
+    fallback_prompt_normalizations,
+    split_prompt_sources,
+    target_type_for,
+    trusted_prompt_normalizations,
+)
 from .qc import ReportEvidenceBuilder, assess_report_readiness
 from .storage import ResearchStore
 from .tools import (
@@ -85,6 +102,11 @@ class AgentState(TypedDict, total=False):
     report_scope: str
     report_readiness: dict
     artifact_inventory: list[dict]
+    # Per-turn, typed record of the source text, language regime, and exact text
+    # sent to VoxTell. The cache prevents a prompt from invoking Qwen twice when
+    # a deterministic workflow decision immediately follows classification.
+    prompt_normalizations: list[dict]
+    prompt_normalization_cache: dict[str, dict]
 
 
 TURN_RESET = "__turn_reset__"
@@ -127,6 +149,8 @@ def new_turn() -> dict:
         "critic_findings": [],
         "report_scope": "comprehensive",
         "report_readiness": {},
+        "prompt_normalizations": [],
+        "prompt_normalization_cache": {},
     }
 
 
@@ -200,6 +224,9 @@ class SegAgentGraph:
             "message_context": dict(state.get("message_context") or {}),
             "report_scope": state.get("report_scope") or "comprehensive",
             "report_readiness": dict(state.get("report_readiness") or {}),
+            "prompt_normalizations": list(
+                state.get("prompt_normalizations") or []
+            ),
             "artifact_inventory": self.segmentation_tool.store.artifact_inventory(
                 state["case_id"]
             ),
@@ -237,6 +264,259 @@ class SegAgentGraph:
         if isinstance(result, dict):
             return PlannerAnswer.model_validate(result)
         return PlannerAnswer(text=str(result or ""))
+
+    @staticmethod
+    def _prompt_cache_key(text: str) -> str:
+        return clean_prompt(text).casefold()
+
+    def _normalization_sources(self, state: AgentState) -> list[str]:
+        """Return only user-originated segmentation text needed before gates."""
+
+        intent_data = state.get("intent") or {}
+        intent = intent_data.get("intent")
+        if intent in {Intent.ORGAN.value, Intent.OAR.value}:
+            targets = [
+                cleaned
+                for item in (intent_data.get("targets") or [])
+                if (cleaned := clean_prompt(str(item)))
+            ]
+            if intent == Intent.OAR.value and not targets:
+                # A site-level OAR request is not itself a VoxTell prompt. The
+                # protocol lookup will later provide the trusted structure list.
+                return []
+            question = str(state.get("question") or "")
+            requested = extract_open_target(question)
+            if requested is None and targets and re.search(
+                r"[,;；、\n]|\s+\band\b\s+",
+                question,
+                re.IGNORECASE,
+            ):
+                requested = question
+            if requested:
+                extracted = split_prompt_sources(
+                    requested,
+                    known_anatomy=self._organ_names,
+                )
+                if extracted:
+                    return extracted
+            return targets
+        if intent == Intent.GTV.value and not (state.get("answers") or {}).get(
+            "gtv_first_mask"
+        ):
+            description = (
+                (state.get("answers") or {}).get("gtv_description")
+                or intent_data.get("source_description")
+                or state.get("question")
+                or ""
+            )
+            return split_prompt_sources(
+                str(description),
+                known_anatomy=self._organ_names,
+            )
+        return []
+
+    def _call_prompt_normalizer(
+        self,
+        prompts: list[str],
+        on_delta: Callable[[str], None],
+    ) -> PromptNormalizationBatch:
+        method = getattr(self.planner, "normalize_prompts", None)
+        if not callable(method):
+            return fallback_prompt_normalizations(
+                prompts, reason="planner has no prompt normalizer"
+            )
+        kwargs = {}
+        if "on_thinking_delta" in signature(method).parameters:
+            kwargs["on_thinking_delta"] = on_delta
+        result = method(prompts, **kwargs)
+        if isinstance(result, PromptNormalizationBatch):
+            return result
+        return PromptNormalizationBatch.model_validate(result)
+
+    def _normalize_prompt_batch(
+        self,
+        prompts: list[str],
+        cache: dict[str, dict],
+        step: int,
+    ) -> tuple[PromptNormalizationBatch, dict[str, dict], list[dict]]:
+        """Normalize missing prompts once and return them in source order."""
+
+        sources = [clean_prompt(item) for item in prompts]
+        sources = [item for item in sources if item]
+        if not sources:
+            raise ValueError("prompt normalization requires at least one prompt")
+        updated_cache = dict(cache)
+        missing = [
+            source
+            for source in sources
+            if self._prompt_cache_key(source) not in updated_cache
+        ]
+        events: list[dict] = []
+        thinking: str | None = None
+        if missing:
+            emit_live(
+                event(
+                    "phase_started",
+                    phase="normalize_prompt",
+                    label="Normalizing prompts for VoxTell",
+                    prompt_count=len(missing),
+                )
+            )
+
+            streamed_reasoning: list[str] = []
+
+            def on_delta(delta: str) -> None:
+                streamed_reasoning.append(delta)
+                emit_live(
+                    event(
+                        "thinking_delta",
+                        delta=delta,
+                        step=step,
+                        channel="prompt_normalizer",
+                    )
+                )
+
+            fallback_reason = None
+            try:
+                normalized = self._call_prompt_normalizer(missing, on_delta)
+                if len(normalized.items) != len(missing):
+                    raise ValueError("normalizer changed prompt batch cardinality")
+                for index, (source, item) in enumerate(
+                    zip(missing, normalized.items)
+                ):
+                    if item.source_index != index:
+                        raise ValueError("normalizer changed source order")
+                    if clean_prompt(item.source_text) != source:
+                        raise ValueError("normalizer changed source identity")
+                thinking = normalized.thinking or "".join(streamed_reasoning) or None
+            except Exception as exc:
+                fallback_reason = f"{type(exc).__name__}: {exc}"[:300]
+                normalized = fallback_prompt_normalizations(
+                    missing, reason=fallback_reason
+                )
+                thinking = "".join(streamed_reasoning) or None
+            for source, item in zip(missing, normalized.items):
+                payload = item.model_dump(mode="json")
+                updated_cache[self._prompt_cache_key(source)] = payload
+                # The next deterministic workflow step names the normalized
+                # prompt. Alias that key to the same provenance so eye_L ->
+                # left eye does not invoke Qwen again or lose the source label.
+                updated_cache.setdefault(
+                    self._prompt_cache_key(item.voxtell_prompt),
+                    payload,
+                )
+            if thinking:
+                events.append(
+                    event(
+                        "thinking",
+                        step=step,
+                        thinking=thinking,
+                        channel="prompt_normalizer",
+                        complete=True,
+                    )
+                )
+            events.append(
+                event(
+                    "phase_completed",
+                    phase="normalize_prompt",
+                    label="VoxTell prompts normalized",
+                    detail="; ".join(
+                        f"{item.source_text} → {item.category.value} → "
+                        f"{item.voxtell_prompt}"
+                        for item in normalized.items
+                    ),
+                    fallback=bool(fallback_reason),
+                    normalizations=[
+                        {
+                            "source": item.source_text,
+                            "category": item.category.value,
+                            "prompt": item.voxtell_prompt,
+                            "normalized_by": item.normalized_by,
+                            "exploratory": item.exploratory,
+                        }
+                        for item in normalized.items
+                    ],
+                )
+            )
+
+        ordered: list[PromptNormalization] = []
+        for index, source in enumerate(sources):
+            item = PromptNormalization.model_validate(
+                updated_cache[self._prompt_cache_key(source)]
+            )
+            ordered.append(
+                item.model_copy(update={"source_index": index})
+            )
+        batch = dedupe_prompt_normalizations(
+            PromptNormalizationBatch(items=ordered, thinking=thinking)
+        )
+        return batch, updated_cache, events
+
+    @staticmethod
+    def _apply_prompt_categories(
+        state: AgentState,
+        batch: PromptNormalizationBatch,
+    ) -> None:
+        """Let prompt language refine open-vocabulary anatomy/pathology routing."""
+
+        intent_data = dict(state.get("intent") or {})
+        intent = intent_data.get("intent")
+        categories = {item.category for item in batch.items}
+        if intent not in {Intent.ORGAN.value, Intent.OAR.value, Intent.GTV.value}:
+            return
+        if len(batch.items) > 1 and categories != {
+            PromptCategory.ANATOMICAL_CONCEPT
+        }:
+            intent_data["intent"] = Intent.AMBIGUOUS.value
+            intent_data["targets"] = []
+            intent_data["source_description"] = None
+            intent_data["rationale"] = (
+                "The request contains multiple prompts from different or "
+                "target-like language regimes; split it into separate requests."
+            )
+            state["intent"] = intent_data
+            return
+        if categories == {PromptCategory.ANATOMICAL_CONCEPT}:
+            if intent in {Intent.ORGAN.value, Intent.OAR.value}:
+                intent_data["targets"] = [
+                    item.voxtell_prompt for item in batch.items
+                ]
+                state["intent"] = intent_data
+            elif intent == Intent.GTV.value:
+                intent_data["intent"] = Intent.AMBIGUOUS.value
+                intent_data["source_description"] = None
+                intent_data["rationale"] = (
+                    "The request was routed as a target, but normalization found "
+                    "only anatomical concepts."
+                )
+                state["intent"] = intent_data
+            return
+        if intent == Intent.GTV.value and categories.issubset(
+            {
+                PromptCategory.PATHOLOGICAL_STRUCTURE,
+                PromptCategory.CLINICAL_DESCRIPTION,
+            }
+        ):
+            if len(batch.items) == 1:
+                intent_data["source_description"] = batch.items[0].voxtell_prompt
+            state["intent"] = intent_data
+            return
+        if categories.issubset(
+            {
+                PromptCategory.PATHOLOGICAL_STRUCTURE,
+                PromptCategory.CLINICAL_DESCRIPTION,
+            }
+        ):
+            # This is especially important for unseen pathology names that the
+            # deterministic keyword classifier initially treats as open anatomy.
+            intent_data["intent"] = Intent.GTV.value
+            if len(batch.items) == 1:
+                intent_data["source_description"] = batch.items[0].voxtell_prompt
+            intent_data["targets"] = []
+            intent_data["rationale"] = (
+                "The prompt normalizer identified pathological/report language."
+            )
+            state["intent"] = intent_data
 
     def _build(self) -> StateGraph:
         graph = StateGraph(AgentState)
@@ -659,6 +939,12 @@ class SegAgentGraph:
                 step=step,
             )
         )
+        normalization_cache = dict(
+            state.get("prompt_normalization_cache") or {}
+        )
+        normalization_events: list[dict] = []
+        active_normalizations = list(state.get("prompt_normalizations") or [])
+        request_normalized: PromptNormalizationBatch | None = None
 
         def on_delta(delta: str) -> None:
             emit_live(
@@ -681,6 +967,28 @@ class SegAgentGraph:
                     "segagent.step": step,
                 },
             ):
+                sources = self._normalization_sources(planning_state)
+                if sources:
+                    request_normalized, normalization_cache, new_events = (
+                        self._normalize_prompt_batch(
+                            sources, normalization_cache, step
+                        )
+                    )
+                    active_normalizations = [
+                        item.model_dump(mode="json")
+                        for item in request_normalized.items
+                    ]
+                    normalization_events.extend(new_events)
+                    planning_state["prompt_normalizations"] = (
+                        active_normalizations
+                    )
+                    planning_state["prompt_normalization_cache"] = (
+                        normalization_cache
+                    )
+                    self._apply_prompt_categories(
+                        planning_state, request_normalized
+                    )
+
                 stop = rejection_notice(planning_state)
                 gate = pre_plan_gate(
                     planning_state,
@@ -728,6 +1036,124 @@ class SegAgentGraph:
                             planning_state, step, observations, on_delta
                         ),
                     )
+
+                if decision.action == PlannerAction.SEGMENT:
+                    if (
+                        request_normalized is not None
+                        and (
+                            decision.workflow_stage is None
+                            or decision.workflow_stage.value
+                            != STAGE_TUMOR_BLIND
+                        )
+                        and [
+                            item.casefold() for item in decision.structures
+                        ]
+                        == [
+                            item.voxtell_prompt.casefold()
+                            for item in request_normalized.items
+                        ]
+                    ):
+                        normalized = request_normalized
+                        new_events = []
+                    elif (
+                        decision.workflow_stage is not None
+                        and decision.workflow_stage.value
+                        in {
+                            STAGE_OAR_FULL,
+                            STAGE_TUMOR_BLIND,
+                            STAGE_TUMOR_NEIGHBOURS,
+                            STAGE_TUMOR_REFINE,
+                        }
+                    ):
+                        stage = decision.workflow_stage.value
+                        category = (
+                            PromptCategory.ANATOMICAL_CONCEPT
+                            if stage
+                            in {STAGE_OAR_FULL, STAGE_TUMOR_NEIGHBOURS}
+                            else (
+                                PromptCategory.PATHOLOGICAL_STRUCTURE
+                                if stage == STAGE_TUMOR_BLIND
+                                else PromptCategory.CLINICAL_DESCRIPTION
+                            )
+                        )
+                        source_texts = None
+                        exploratory = stage == STAGE_TUMOR_BLIND
+                        fallback_reason = None
+                        if exploratory:
+                            original = (
+                                request_normalized.items[0].source_text
+                                if (
+                                    request_normalized is not None
+                                    and len(request_normalized.items) == 1
+                                )
+                                else clean_prompt(
+                                    str(
+                                        (
+                                            planning_state.get("intent") or {}
+                                        ).get("source_description")
+                                        or planning_state.get("question")
+                                        or "tumor"
+                                    )
+                                )
+                            )
+                            source_texts = [original or "tumor"]
+                            fallback_reason = (
+                                "Exploratory blind report-language prompt; "
+                                "not a diagnosis"
+                            )
+                        normalized = trusted_prompt_normalizations(
+                            decision.structures,
+                            category,
+                            source_texts=source_texts,
+                            exploratory=exploratory,
+                            reason=fallback_reason,
+                        )
+                        new_events = [
+                            event(
+                                "phase_completed",
+                                phase="normalize_prompt",
+                                label="Trusted workflow prompts retained",
+                                detail="; ".join(
+                                    f"{item.source_text} → "
+                                    f"{item.category.value} → "
+                                    f"{item.voxtell_prompt}"
+                                    for item in normalized.items
+                                ),
+                                fallback=False,
+                                trusted_workflow=True,
+                                normalizations=[
+                                    {
+                                        "source": item.source_text,
+                                        "category": item.category.value,
+                                        "prompt": item.voxtell_prompt,
+                                        "normalized_by": item.normalized_by,
+                                        "exploratory": item.exploratory,
+                                    }
+                                    for item in normalized.items
+                                ],
+                            )
+                        ]
+                    else:
+                        normalized, normalization_cache, new_events = (
+                            self._normalize_prompt_batch(
+                                decision.structures,
+                                normalization_cache,
+                                step,
+                            )
+                        )
+                    normalization_events.extend(new_events)
+                    active_normalizations = [
+                        item.model_dump(mode="json") for item in normalized.items
+                    ]
+                    decision = decision.model_copy(
+                        update={
+                            "structures": [
+                                item.voxtell_prompt
+                                for item in normalized.items
+                            ],
+                            "prompt_normalizations": normalized.items,
+                        }
+                    )
         except Exception as exc:
             emit_live(
                 event(
@@ -739,7 +1165,7 @@ class SegAgentGraph:
                 )
             )
             raise
-        events = []
+        events = list(normalization_events)
         # The model's own reasoning is surfaced as its own step so the UI can
         # fold it; it is never treated as evidence.
         if decision.thinking:
@@ -767,6 +1193,10 @@ class SegAgentGraph:
                 action=decision.action.value,
                 rationale_summary=decision.rationale_summary,
                 structures=decision.structures,
+                prompt_normalizations=[
+                    item.model_dump(mode="json")
+                    for item in decision.prompt_normalizations
+                ],
                 site_query=decision.site_query,
                 workflow_stage=(
                     decision.workflow_stage.value if decision.workflow_stage else None
@@ -796,6 +1226,9 @@ class SegAgentGraph:
             "decisions": [decision.model_dump(mode="json")],
             "observations": added_observations,
             "report_readiness": report_readiness or state.get("report_readiness", {}),
+            "intent": planning_state.get("intent") or state.get("intent", {}),
+            "prompt_normalizations": active_normalizations,
+            "prompt_normalization_cache": normalization_cache,
             "events": events,
         }
 
@@ -933,11 +1366,46 @@ class SegAgentGraph:
         # target: tagging them GTV would flag them all as unvalidated tumors.
         if stage == STAGE_TUMOR_NEIGHBOURS:
             target_type = TargetType.ORGAN
+        request_normalizations = (
+            decision.prompt_normalizations
+            if [
+                item.voxtell_prompt.casefold()
+                for item in decision.prompt_normalizations
+            ]
+            == [item.casefold() for item in prompts]
+            else []
+        )
+        if stage == STAGE_TUMOR_BLIND and not request_normalizations:
+            recorded = list(state.get("prompt_normalizations") or [])
+            original = (
+                str(recorded[0].get("source_text") or "")
+                if len(recorded) == 1
+                else ""
+            )
+            original = clean_prompt(
+                original
+                or str(
+                    (state.get("intent") or {}).get("source_description")
+                    or state.get("question")
+                    or "tumor"
+                )
+            )
+            request_normalizations = trusted_prompt_normalizations(
+                prompts,
+                PromptCategory.PATHOLOGICAL_STRUCTURE,
+                source_texts=[original or "tumor"],
+                exploratory=True,
+                reason=(
+                    "Exploratory blind report-language prompt; "
+                    "not a diagnosis"
+                ),
+            ).items
         request = SegmentRequest(
             case_id=state["case_id"],
             structures=prompts,
             purpose=state["question"],
             target_type=target_type,
+            prompt_normalizations=request_normalizations,
         )
         emit_live(
             event(
@@ -1061,6 +1529,123 @@ class SegAgentGraph:
         }
 
 
+class ConversationConflictError(RuntimeError):
+    """Raised when one conversation already has an active response stream."""
+
+    def __init__(self, case_id: str):
+        self.case_id = case_id
+        super().__init__(
+            "Another request is already running for this case. "
+            "Wait for it to finish before sending another message."
+        )
+
+
+class _SingleFlightStream(Iterator[RunEvent]):
+    """Own one case lease until a logical terminal event or transport abort."""
+
+    def __init__(
+        self,
+        source: Iterator[RunEvent],
+        release: Callable[[], None],
+        finish: Callable[[str], None],
+    ):
+        self._source = iter(source)
+        self._release = release
+        self._finish_callback = finish
+        self._state_lock = threading.Lock()
+        self._next_active = False
+        self._close_requested = False
+        self._finished = False
+
+    def __iter__(self) -> "_SingleFlightStream":
+        return self
+
+    def __next__(self) -> RunEvent:
+        with self._state_lock:
+            if self._finished:
+                raise StopIteration
+            if self._next_active:
+                raise RuntimeError("response stream is already being advanced")
+            self._next_active = True
+        try:
+            item = next(self._source)
+        except StopIteration:
+            with self._state_lock:
+                self._next_active = False
+                outcome = self._claim_finish_locked("nonterminal")
+            if outcome is not None:
+                self._finish(outcome)
+            raise
+        except BaseException:
+            with self._state_lock:
+                self._next_active = False
+                outcome = self._claim_finish_locked("exception")
+            if outcome is not None:
+                self._finish(outcome)
+            raise
+        terminal = item.type if item.type in {"question_pending", "run_completed", "error"} else None
+        with self._state_lock:
+            self._next_active = False
+            if terminal is not None:
+                outcome = self._claim_finish_locked(terminal)
+            elif self._close_requested:
+                outcome = self._claim_finish_locked("aborted")
+            else:
+                outcome = None
+        if outcome is not None:
+            self._finish(outcome)
+        if terminal is not None:
+            # The durable terminal state and lease release happen before the
+            # event reaches the client, so an immediate clarification reply is
+            # a legitimate next flight.
+            return item
+        if outcome == "aborted":
+            raise StopIteration
+        return item
+
+    def _claim_finish_locked(self, outcome: str) -> str | None:
+        if self._finished:
+            return None
+        self._finished = True
+        return outcome
+
+    def _finish(self, outcome: str) -> None:
+        # This runs only after the active next() call has returned from the
+        # source. Closing an executing generator would release the lease while
+        # its model work was still alive.
+        try:
+            close = getattr(self._source, "close", None)
+            if close is not None:
+                close()
+        except BaseException:
+            # State repair and lease release are more important than an error
+            # raised by generator cleanup.
+            pass
+        try:
+            self._finish_callback(outcome)
+        finally:
+            self._release()
+
+    def close(self) -> None:
+        with self._state_lock:
+            if self._finished:
+                return
+            if self._next_active:
+                self._close_requested = True
+                return
+            outcome = self._claim_finish_locked("aborted")
+        if outcome is not None:
+            self._finish(outcome)
+
+    def __del__(self) -> None:
+        # A StreamingResponse normally closes its iterator. This fallback also
+        # releases an acquired lease if a response is abandoned before iteration.
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
 class WorkflowService:
     """Persists graph updates as typed events and streams them to the client."""
 
@@ -1073,6 +1658,67 @@ class WorkflowService:
         self.store = store
         self.graph = graph
         self.intent_classifier = intent_classifier
+        self._flight_lock = threading.Lock()
+        self._active_cases: dict[str, object] = {}
+
+    def _acquire_case(self, case_id: str) -> object:
+        token = object()
+        with self._flight_lock:
+            if case_id in self._active_cases:
+                raise ConversationConflictError(case_id)
+            self._active_cases[case_id] = token
+        return token
+
+    def _release_case(self, case_id: str, token: object) -> None:
+        with self._flight_lock:
+            if self._active_cases.get(case_id) is token:
+                del self._active_cases[case_id]
+
+    def _single_flight(
+        self,
+        case_id: str,
+        token: object,
+        run_id: str,
+        source: Iterator[RunEvent],
+    ) -> Iterator[RunEvent]:
+        return _SingleFlightStream(
+            source,
+            lambda: self._release_case(case_id, token),
+            lambda outcome: self._finish_run_stream(run_id, outcome),
+        )
+
+    def _finish_run_stream(self, run_id: str, outcome: str) -> None:
+        """Repair durable state before another flight for this case can start."""
+
+        try:
+            run = self.store.get_run(run_id)
+        except (FileNotFoundError, ValueError):
+            return
+
+        if outcome == "run_completed":
+            if run.status != "completed":
+                run.status = "completed"
+                self.store.save_run(run)
+        elif outcome != "question_pending":
+            # Any stream without a delivered suspension/completion is failed,
+            # including an accepted reply that was closed before first iteration.
+            if run.status in {"created", "running", "waiting_reply"}:
+                run.status = "failed"
+                self.store.save_run(run)
+
+        if outcome == "question_pending" or not run.conversation_id:
+            return
+        try:
+            conversation = self.store.get_conversation(run.conversation_id)
+        except (FileNotFoundError, ValueError):
+            return
+        if conversation.pending_run_id != run_id:
+            return
+        conversation.pending_question = None
+        conversation.pending_run_id = None
+        conversation.pending_gate = None
+        conversation.pending_context = {}
+        self.store.save_conversation(conversation)
 
     def _validate_message_context(
         self,
@@ -1115,92 +1761,109 @@ class WorkflowService:
         text = " ".join(text.strip().split())
         if not text or len(text) > 4000:
             raise ValueError("message must contain 1-4000 characters")
-        context = self._validate_message_context(case_id, message_context)
         conversation = self.store.conversation_for_case(case_id)
-        if conversation.pending_run_id:
-            try:
-                return self.reply(conversation.pending_run_id, text, context)
-            except (ValueError, FileNotFoundError):
-                # The pending turn is gone or no longer waiting; start a new one.
-                conversation.pending_run_id = None
-                conversation.pending_question = None
-                conversation.pending_gate = None
-                conversation.pending_context = {}
-                self.store.save_conversation(conversation)
-
-        run = self.store.create_run(case_id, text, conversation.conversation_id)
-        self.store.append_message(
-            conversation.conversation_id,
-            case_id,
-            ChatRole.USER,
-            text,
-            run.run_id,
-            metadata={"artifact_context": context.model_dump(mode="json")},
-        )
-        history = [
-            item.model_dump(mode="json")
-            for item in self.store.messages(conversation.conversation_id)
-        ]
-
-        intent_payload: dict = {}
-        # Uploaded contours drive QC; any contour or generated mask is enough to
-        # report on.
-        has_uploaded = False
-        has_any_mask = False
+        conversation_id = conversation.conversation_id
+        lease_token = self._acquire_case(case_id)
         try:
-            case = self.store.get_case(case_id)
-            has_uploaded = bool(case.contours)
-            has_any_mask = any(
-                item.kind in {"contour", "mask"} for item in case.artifacts
-            )
-        except Exception:
-            pass
-        if self.intent_classifier is not None:
-            try:
-                task_intent = self.intent_classifier.classify(
-                    text, has_contours=has_uploaded
-                )
-                intent_payload = {"intent": task_intent.model_dump(mode="json")}
-            except Exception as exc:
-                # A classifier failure silently disables every intent gate, so
-                # surface it in the trace instead of degrading without a trace.
-                intent_payload = {
-                    "intent_error": f"{type(exc).__name__}: {exc}",
-                }
+            context = self._validate_message_context(case_id, message_context)
+            if conversation.pending_run_id:
+                try:
+                    pending = self.store.get_run(conversation.pending_run_id)
+                    return self._reply_acquired(
+                        pending,
+                        text,
+                        context,
+                        lease_token,
+                    )
+                except (ValueError, FileNotFoundError):
+                    # The pending turn is gone or no longer waiting; start a new one.
+                    conversation.pending_run_id = None
+                    conversation.pending_question = None
+                    conversation.pending_gate = None
+                    conversation.pending_context = {}
+                    self.store.save_conversation(conversation)
 
-        def stream() -> Iterator[RunEvent]:
-            run.status = "running"
-            self.store.save_run(run)
-            conversation.turn_count += 1
-            self.store.save_conversation(conversation)
-            yield self._persist(
-                run.run_id,
+            run = self.store.create_run(case_id, text, conversation_id)
+            self.store.append_message(
+                conversation_id,
                 case_id,
-                event(
-                    "run_started",
-                    question=text,
-                    message_context=context.model_dump(mode="json"),
-                    artifact_inventory=self.store.artifact_inventory(case_id),
-                    **intent_payload,
-                ),
+                ChatRole.USER,
+                text,
+                run.run_id,
+                metadata={"artifact_context": context.model_dump(mode="json")},
             )
-            initial: AgentState = {
-                "case_id": case_id,
-                "run_id": run.run_id,
-                "conversation_id": conversation.conversation_id,
-                "question": text,
-                "history": history,
-                "intent": intent_payload.get("intent", {}),
-                "has_contours": has_any_mask,
-                "message_context": context.model_dump(mode="json"),
-                "artifact_inventory": self.store.artifact_inventory(case_id),
-                "step": 0,
-                "events": [],
-                **new_turn(),
-            }
-            yield from self._execute(run.run_id, conversation.conversation_id, initial)
+            history = [
+                item.model_dump(mode="json")
+                for item in self.store.messages(conversation_id)
+            ]
 
-        return run.run_id, stream()
+            intent_payload: dict = {}
+            # Uploaded contours drive QC; any contour or generated mask is enough to
+            # report on.
+            has_uploaded = False
+            has_any_mask = False
+            try:
+                case = self.store.get_case(case_id)
+                has_uploaded = bool(case.contours)
+                has_any_mask = any(
+                    item.kind in {"contour", "mask"} for item in case.artifacts
+                )
+            except Exception:
+                pass
+            if self.intent_classifier is not None:
+                try:
+                    task_intent = self.intent_classifier.classify(
+                        text, has_contours=has_uploaded
+                    )
+                    intent_payload = {"intent": task_intent.model_dump(mode="json")}
+                except Exception as exc:
+                    # A classifier failure silently disables every intent gate, so
+                    # surface it in the trace instead of degrading without a trace.
+                    intent_payload = {
+                        "intent_error": f"{type(exc).__name__}: {exc}",
+                    }
+
+            def stream() -> Iterator[RunEvent]:
+                run.status = "running"
+                self.store.save_run(run)
+                conversation.turn_count += 1
+                self.store.save_conversation(conversation)
+                yield self._persist(
+                    run.run_id,
+                    case_id,
+                    event(
+                        "run_started",
+                        question=text,
+                        message_context=context.model_dump(mode="json"),
+                        artifact_inventory=self.store.artifact_inventory(case_id),
+                        **intent_payload,
+                    ),
+                )
+                initial: AgentState = {
+                    "case_id": case_id,
+                    "run_id": run.run_id,
+                    "conversation_id": conversation_id,
+                    "question": text,
+                    "history": history,
+                    "intent": intent_payload.get("intent", {}),
+                    "has_contours": has_any_mask,
+                    "message_context": context.model_dump(mode="json"),
+                    "artifact_inventory": self.store.artifact_inventory(case_id),
+                    "step": 0,
+                    "events": [],
+                    **new_turn(),
+                }
+                yield from self._execute(run.run_id, conversation_id, initial)
+
+            return run.run_id, self._single_flight(
+                case_id,
+                lease_token,
+                run.run_id,
+                stream(),
+            )
+        except BaseException:
+            self._release_case(case_id, lease_token)
+            raise
 
     def reply(
         self,
@@ -1213,23 +1876,38 @@ class WorkflowService:
         if not text or len(text) > 4000:
             raise ValueError("reply must contain 1-4000 characters")
         run = self.store.get_run(run_id)
+        lease_token = self._acquire_case(run.case_id)
+        try:
+            context = self._validate_message_context(run.case_id, message_context)
+            return self._reply_acquired(run, text, context, lease_token)
+        except BaseException:
+            self._release_case(run.case_id, lease_token)
+            raise
+
+    def _reply_acquired(
+        self,
+        run: RunRecord,
+        text: str,
+        context: MessageArtifactContext,
+        lease_token: object,
+    ) -> tuple[str, Iterator[RunEvent]]:
+        """Build a reply stream while the caller owns its conversation lease."""
+
         if run.status != "waiting_reply":
             raise ValueError("this turn is not waiting for a reply")
-        context = self._validate_message_context(run.case_id, message_context)
-        conversation_id = run.conversation_id or ""
-        if conversation_id:
-            self.store.append_message(
-                conversation_id,
-                run.case_id,
-                ChatRole.USER,
-                text,
-                run_id,
-                metadata={"artifact_context": context.model_dump(mode="json")},
-            )
+        persisted_conversation_id = run.conversation_id or ""
 
         def stream() -> Iterator[RunEvent]:
-            if conversation_id:
-                conversation = self.store.get_conversation(conversation_id)
+            if persisted_conversation_id:
+                conversation = self.store.get_conversation(persisted_conversation_id)
+                self.store.append_message(
+                    persisted_conversation_id,
+                    run.case_id,
+                    ChatRole.USER,
+                    text,
+                    run.run_id,
+                    metadata={"artifact_context": context.model_dump(mode="json")},
+                )
                 conversation.pending_question = None
                 conversation.pending_run_id = None
                 conversation.pending_gate = None
@@ -1254,12 +1932,17 @@ class WorkflowService:
             except Exception:
                 pass
             yield from self._execute(
-                run_id,
-                conversation_id,
+                run.run_id,
+                persisted_conversation_id,
                 Command(resume=resume_payload),
             )
 
-        return run_id, stream()
+        return run.run_id, self._single_flight(
+            run.case_id,
+            lease_token,
+            run.run_id,
+            stream(),
+        )
 
     def _execute(
         self,

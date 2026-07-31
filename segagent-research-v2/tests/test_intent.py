@@ -71,6 +71,12 @@ class IntentClassifierTests(unittest.TestCase):
     def test_open_vocabulary_and_chinese_structure_requests(self) -> None:
         clf = IntentClassifier(organ_names=["left eye"])
         self.assertEqual(clf.classify("segment the appendix").targets, ["appendix"])
+        for target in ("appendix", "aorta", "adrenal gland", "anal canal", "thecal sac"):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    clf.classify(f"segment {target}").targets,
+                    [target],
+                )
         chinese = clf.classify("分割左眼")
         self.assertEqual(chinese.intent, Intent.ORGAN)
         self.assertEqual(chinese.targets, ["left eye"])

@@ -37,9 +37,10 @@ def profile_for(intent: Intent) -> IntentProfile:
 
 
 GTV_TERMS = (
-    "gtv", "gross tumor", "gross tumour", "tumor", "tumour", "lesion", "carcinoma",
-    "metastas", "malignan", "neoplasm", "target volume", "ctv", "靶区", "肿瘤",
-    "病灶", "转移", "癌",
+    "gtv", "gross tumor", "gross tumour", "tumor", "tumors", "tumour", "tumours",
+    "lesion", "lesions", "mass", "masses", "cancer", "cancers", "carcinoma",
+    "carcinomas", "metastas", "malignan", "neoplasm", "neoplasms",
+    "target volume", "ctv", "ptv", "itv", "靶区", "肿瘤", "病灶", "转移", "癌",
 )
 OAR_TERMS = (
     "oar", "organs at risk", "organ at risk", "risk organ", "spare", "radiotherapy",
@@ -208,7 +209,8 @@ def _speech_act(text: str) -> str:
 
 _OPEN_EN = re.compile(
     r"(?:^|\b)(?:segment|contour|delineate|outline|draw|find|locate|identify|mark|highlight)"
-    r"(?:\s+(?:out|me|us))?\s+(?:all|any|the|an|a|this|that)?\s*(.+)$",
+    r"(?:\s+(?:out|me|us))?\s+"
+    r"(?:(?:all|any|the|an|a|this|that)\s+)?(.+)$",
     re.IGNORECASE,
 )
 _OPEN_CJK = re.compile(r"^(?:请|帮我|麻烦)?(?:分割|勾画|标注|找出|定位)(?:一下)?\s*(.+)$")

@@ -45,6 +45,28 @@ class SplitThinkingTests(unittest.TestCase):
         parser.feed("plain answer")
         self.assertEqual(deltas, [])
 
+    def test_prefilled_open_tag_streams_before_thinking_finishes(self) -> None:
+        """Qwen3.5's opening tag is in the skipped generation prompt."""
+
+        deltas = []
+        parser = ThinkingDeltaParser(deltas.append, starts_in_thinking=True)
+        parser.feed("first ")
+        self.assertEqual(deltas, ["first "])
+        self.assertFalse(parser.closed)
+        parser.feed("thought</thi")
+        self.assertEqual("".join(deltas), "first thought")
+        parser.feed('nk>{"action":"final"}')
+        self.assertTrue(parser.closed)
+        self.assertEqual("".join(deltas), "first thought")
+
+    def test_prefilled_mode_still_suppresses_an_explicit_split_opener(self) -> None:
+        deltas = []
+        parser = ThinkingDeltaParser(deltas.append, starts_in_thinking=True)
+        parser.feed("<thi")
+        self.assertEqual(deltas, [])
+        parser.feed("nk>live</think>answer")
+        self.assertEqual(deltas, ["live"])
+
 
 class InspectMaskDecisionTests(unittest.TestCase):
     def test_inspect_mask_requires_structures(self) -> None:

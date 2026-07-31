@@ -36,6 +36,14 @@ class TargetType(str, Enum):
     UNKNOWN = "unknown"
 
 
+class PromptCategory(str, Enum):
+    """The three text regimes accepted by the segmentation model."""
+
+    ANATOMICAL_CONCEPT = "anatomical_concept"
+    PATHOLOGICAL_STRUCTURE = "pathological_structure"
+    CLINICAL_DESCRIPTION = "clinical_description"
+
+
 class PlannerAction(str, Enum):
     LOOKUP_PROTOCOL = "lookup_protocol"
     SEGMENT = "segment"
@@ -130,11 +138,55 @@ class RetrievalHit(BaseModel):
     citation: str
 
 
+class PromptNormalization(BaseModel):
+    """One source prompt classified and normalized for VoxTell."""
+
+    source_index: int = Field(ge=0)
+    source_text: str
+    category: PromptCategory
+    voxtell_prompt: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    normalized_by: Literal[
+        "llm",
+        "deterministic_fallback",
+        "trusted_workflow",
+    ] = "llm"
+    fallback_reason: str | None = None
+    # True only for a deliberately broad, user-confirmed first search. The
+    # generated mask remains a hypothesis and must never imply a diagnosis.
+    exploratory: bool = False
+
+    @field_validator("source_text", "voxtell_prompt")
+    @classmethod
+    def validate_prompt_text(cls, value: str) -> str:
+        normalized = " ".join(str(value or "").strip().split())
+        if not normalized or len(normalized) > 400:
+            raise ValueError("prompt text must be a non-empty string <= 400 chars")
+        return normalized
+
+
+class PromptNormalizationBatch(BaseModel):
+    items: list[PromptNormalization] = Field(min_length=1, max_length=64)
+    # Model thinking is displayed for transparency but never used as evidence.
+    thinking: str | None = None
+
+    @model_validator(mode="after")
+    def source_indexes_are_sequential(self) -> "PromptNormalizationBatch":
+        if [item.source_index for item in self.items] != list(
+            range(len(self.items))
+        ):
+            raise ValueError(
+                "prompt normalizations must use every source index once in order"
+            )
+        return self
+
+
 class SegmentRequest(BaseModel):
     case_id: str
     structures: list[str] = Field(min_length=1, max_length=64)
     purpose: str = "answer the user's question"
     target_type: "TargetType" = TargetType.UNKNOWN
+    prompt_normalizations: list[PromptNormalization] = Field(default_factory=list)
 
     @field_validator("structures")
     @classmethod
@@ -154,6 +206,38 @@ class SegmentRequest(BaseModel):
         if not result:
             raise ValueError("at least one structure is required")
         return result
+
+    @model_validator(mode="after")
+    def prompt_normalizations_match_structures(self) -> "SegmentRequest":
+        if not self.prompt_normalizations:
+            return self
+        if len(self.prompt_normalizations) != len(self.structures):
+            raise ValueError("prompt_normalizations must align one-to-one with structures")
+        indexes = [item.source_index for item in self.prompt_normalizations]
+        if indexes != list(range(len(self.prompt_normalizations))):
+            raise ValueError(
+                "prompt_normalizations must use sequential source indexes"
+            )
+        for structure, item in zip(self.structures, self.prompt_normalizations):
+            if structure.casefold() != item.voxtell_prompt.casefold():
+                raise ValueError(
+                    "each structure must equal its normalized VoxTell prompt"
+                )
+        if self.target_type in {TargetType.ORGAN, TargetType.OAR} and any(
+            item.category != PromptCategory.ANATOMICAL_CONCEPT
+            for item in self.prompt_normalizations
+        ):
+            raise ValueError(
+                "organ/OAR requests require anatomical prompt categories"
+            )
+        if self.target_type == TargetType.GTV and any(
+            item.category == PromptCategory.ANATOMICAL_CONCEPT
+            for item in self.prompt_normalizations
+        ):
+            raise ValueError(
+                "GTV requests require pathological or clinical prompt categories"
+            )
+        return self
 
 
 class StructureMeasurement(BaseModel):
@@ -336,6 +420,10 @@ class PlannerDecision(BaseModel):
     rationale_summary: str
     confidence: float = Field(ge=0.0, le=1.0)
     structures: list[str] = Field(default_factory=list)
+    # Filled by the dedicated prompt normalizer after action selection. Keeping
+    # this separate from ``structures`` preserves the original user text and the
+    # selected language regime for audit.
+    prompt_normalizations: list[PromptNormalization] = Field(default_factory=list)
     site_query: str | None = None
     user_message: str | None = None
     final_answer: str | None = None

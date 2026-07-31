@@ -171,6 +171,12 @@ class ResearchStore:
                 "role": str(item.metadata.get("target_type") or item.kind),
                 "source_model": item.metadata.get("source_model"),
                 "model_version": item.metadata.get("source_version"),
+                "source_prompt": item.metadata.get("source_prompt"),
+                "voxtell_prompt": item.metadata.get("voxtell_prompt"),
+                "prompt_category": item.metadata.get("prompt_category"),
+                "prompt_exploratory": bool(
+                    item.metadata.get("prompt_exploratory", False)
+                ),
                 "artifact_version": item.metadata.get("artifact_version")
                 or item.metadata.get("source_version")
                 or "1",

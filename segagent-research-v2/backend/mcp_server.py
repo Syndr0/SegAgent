@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from .schemas import SegmentRequest
+from .prompts import (
+    dedupe_prompt_normalizations,
+    fallback_prompt_normalizations,
+    is_generic_pathology_prompt,
+)
+from .schemas import (
+    PromptCategory,
+    PromptNormalizationBatch,
+    SegmentRequest,
+    TargetType,
+)
 from .service import get_services
 
 
@@ -22,9 +32,52 @@ def lookup_oar_protocol(query: str) -> dict:
 
 @mcp.tool()
 def segment_volume(case_id: str, structures: list[str], purpose: str) -> dict:
-    """Segment named structures in an already registered, local NIfTI case."""
-    result, _ = get_services().segmentation_tool.run(
-        SegmentRequest(case_id=case_id, structures=structures, purpose=purpose)
+    """Normalize and segment prompts in an already registered local NIfTI case."""
+    services = get_services()
+    try:
+        normalized = services.planner.normalize_prompts(structures)
+        if not isinstance(normalized, PromptNormalizationBatch):
+            normalized = PromptNormalizationBatch.model_validate(normalized)
+    except Exception as exc:
+        normalized = fallback_prompt_normalizations(
+            structures,
+            reason=f"{type(exc).__name__}: {exc}"[:300],
+        )
+    normalized = dedupe_prompt_normalizations(normalized)
+    categories = {item.category for item in normalized.items}
+    if any(
+        is_generic_pathology_prompt(item.voxtell_prompt)
+        for item in normalized.items
+    ):
+        raise ValueError(
+            "A generic tumor/lesion prompt needs spatial context before segmentation"
+        )
+    if PromptCategory.ANATOMICAL_CONCEPT in categories and len(categories) > 1:
+        raise ValueError(
+            "Mixed anatomical and target prompts must be sent as separate requests"
+        )
+    target_type = (
+        TargetType.ORGAN
+        if categories == {PromptCategory.ANATOMICAL_CONCEPT}
+        else (
+            TargetType.GTV
+            if categories.issubset(
+                {
+                    PromptCategory.PATHOLOGICAL_STRUCTURE,
+                    PromptCategory.CLINICAL_DESCRIPTION,
+                }
+            )
+            else TargetType.UNKNOWN
+        )
+    )
+    result, _ = services.segmentation_tool.run(
+        SegmentRequest(
+            case_id=case_id,
+            structures=[item.voxtell_prompt for item in normalized.items],
+            purpose=purpose,
+            target_type=target_type,
+            prompt_normalizations=normalized.items,
+        )
     )
     return result.model_dump(mode="json")
 
@@ -44,4 +97,3 @@ def case_metadata(case_id: str) -> str:
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
-

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, Iterator
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,8 +10,9 @@ from pydantic import Field
 
 from .a2a import router as a2a_router
 from .imaging import load_mask, load_volume
-from .schemas import MessageArtifactContext
+from .schemas import MessageArtifactContext, RunEvent
 from .service import get_services
+from .workflow import ConversationConflictError
 
 
 class RunRequest(MessageArtifactContext):
@@ -35,9 +36,38 @@ app.add_middleware(
 app.include_router(a2a_router)
 
 
-def ndjson(items):
-    for item in items:
-        yield item.model_dump_json() + "\n"
+class _NDJSONStream(Iterator[str]):
+    """Serialize events while forwarding close even before first iteration."""
+
+    def __init__(self, items: Iterator[RunEvent]):
+        self._items = iter(items)
+        self._closed = False
+
+    def __iter__(self) -> "_NDJSONStream":
+        return self
+
+    def __next__(self) -> str:
+        if self._closed:
+            raise StopIteration
+        return next(self._items).model_dump_json() + "\n"
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._items, "close", None)
+        if close is not None:
+            close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
+def ndjson(items: Iterator[RunEvent]) -> Iterator[str]:
+    return _NDJSONStream(items)
 
 
 @app.get("/api/health")
@@ -47,6 +77,16 @@ def health() -> dict:
         "status": "ok",
         "planner": services.settings.planner,
         "voxtellConfigured": services.settings.voxtell_model is not None,
+        "llmDevice": services.settings.resolved_llm_device,
+        "llmInputDevice": services.settings.llm_input_device,
+        "llmDeviceMap": services.settings.llm_device_map,
+        "llmMaxMemory": services.settings.llm_max_memory,
+        "voxtellDevice": services.settings.resolved_voxtell_device,
+        "llmMaxConcurrentGenerations": (
+            services.settings.llm_max_concurrent_generations
+        ),
+        "llmMaxPromptImages": services.settings.llm_max_prompt_images,
+        "voxtellBatchSize": services.settings.voxtell_batch_size,
         "researchOnly": True,
     }
 
@@ -240,11 +280,17 @@ def send_message(case_id: str, request: RunRequest):
                 selected_mask_id=request.selected_mask_id,
             ),
         )
+    except ConversationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     response = StreamingResponse(ndjson(stream), media_type="application/x-ndjson")
     response.headers["X-Run-Id"] = run_id
-    response.headers["Cache-Control"] = "no-store"
+    # Keep token-sized NDJSON chunks moving through common reverse proxies.
+    # Without these headers a proxy may buffer the whole response and make a
+    # genuinely incremental model stream look like a completed-response replay.
+    response.headers["Cache-Control"] = "no-cache, no-store, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
     return response
 
 

@@ -24,7 +24,11 @@ class AppServices:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.store = ResearchStore(settings.data_dir)
-        self.expert = VoxTellBackend(settings.voxtell_model, settings.device)
+        self.expert = VoxTellBackend(
+            settings.voxtell_model,
+            settings.resolved_voxtell_device,
+            settings.voxtell_batch_size,
+        )
         self.knowledge = HybridKnowledgeBase(
             settings.knowledge_dir,
             embed_fn=self.expert.embed,
@@ -34,12 +38,29 @@ class AppServices:
             self.planner = RulePlanner(self.knowledge)
         else:
             self.planner = QwenStructuredPlanner(
-                settings.llm_model,
-                self.store,
-                settings.montage_slices,
-                settings.max_new_tokens,
-                settings.device,
-                settings.enable_thinking,
+                model_id=settings.llm_model,
+                store=self.store,
+                montage_slices=settings.montage_slices,
+                max_new_tokens=settings.max_new_tokens,
+                device=settings.resolved_llm_device,
+                input_device=settings.llm_input_device,
+                enable_thinking=settings.enable_thinking,
+                device_map=settings.llm_device_map,
+                max_memory=settings.llm_max_memory,
+                max_concurrent_generations=settings.llm_max_concurrent_generations,
+                max_prompt_images=settings.llm_max_prompt_images,
+                max_artifacts=settings.llm_max_artifacts,
+                mask_axial_views=settings.llm_mask_axial_views,
+                min_image_tokens=settings.llm_min_image_tokens,
+                max_image_tokens=settings.llm_max_image_tokens,
+                known_anatomy=sorted(
+                    {
+                        str(organ)
+                        for protocol in self.knowledge.protocols
+                        for organ in protocol.get("oars", [])
+                        if organ
+                    }
+                ),
             )
         self.protocol_tool = ProtocolLookupTool(self.knowledge, settings.retrieve_k)
         self.segmentation_tool = SegmentationTool(
@@ -66,4 +87,3 @@ class AppServices:
 @lru_cache(maxsize=1)
 def get_services() -> AppServices:
     return AppServices(get_settings())
-

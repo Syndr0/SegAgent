@@ -24,6 +24,7 @@ research implementation.
 ```text
 case upload -> case/artifact store -> durable per-case conversation
                                       |-> typed intent/dialogue FSM
+                                      |-> typed LLM prompt normalization
                                       |-> protocol retrieval
                                       |-> batched VoxTell segmentation
                                       |-> mask-conditioned VQA/inspection
@@ -61,8 +62,16 @@ cp .env.example .env
 
 export SEGAGENT_VOXTELL_MODEL=/path/to/voxtell_v1.1
 export PYTHONPATH=/path/to/voxtell-web-plugin:$PYTHONPATH
-uvicorn backend.api:app --host 127.0.0.1 --port 8000
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
+uvicorn backend.api:app --host 127.0.0.1 --port 8000 --workers 1
 ```
+
+Keep exactly one API worker for local GPU inference. Do not add `--reload` or
+start multiple Uvicorn/Gunicorn workers: each process can load its own Qwen and
+VoxTell model copies and exhaust GPU memory. Generation is additionally limited
+to one in-process request at a time.
 
 In another terminal:
 
@@ -91,6 +100,35 @@ checkpoint is `Qwen/Qwen3.5-9B` with thinking enabled; use
 `SEGAGENT_LLM_MODEL=Qwen/Qwen3.5-27B` only after comparing it on the same local
 case set.
 
+### Four-GPU local profile
+
+Copy the checked-in four-GPU profile, then set its VoxTell model path:
+
+```bash
+cp .env.4x3090.example .env
+```
+
+This profile uses the following bounded layout for four 24-GiB GPUs:
+
+- `SEGAGENT_LLM_DEVICE=auto` and
+  `SEGAGENT_LLM_DEVICE_MAP=balanced_low_0` let Accelerate place Qwen.
+- `SEGAGENT_LLM_INPUT_DEVICE=cuda:0` keeps inputs and generation outputs on
+  the GPU for which `balanced_low_0` reserves headroom.
+- `SEGAGENT_LLM_MAX_MEMORY` caps GPUs 0-2 at `18GiB` each, allows CPU
+  spillover up to `64GiB`, and excludes GPU 3 from Qwen placement.
+- `SEGAGENT_VOXTELL_DEVICE=cuda:3` reserves GPU 3 for VoxTell's primary
+  workload, while `SEGAGENT_VOXTELL_BATCH_SIZE=4` processes a large OAR set in
+  bounded internal chunks.
+- `SEGAGENT_LLM_MAX_CONCURRENT_GENERATIONS=1` prevents overlapping
+  request-local activation and KV-cache peaks.
+- Each Qwen request is capped at 12 prompt images and 2 artifact masks, with 1
+  axial view per mask, 3 montage slices, and 256-512 visual tokens per image.
+  Generation is capped at 1,536 new tokens.
+
+These are model-input limits, not viewer controls. They do not hide or remove
+masks from the scan viewer. `SEGAGENT_ENABLE_THINKING=true` remains the default,
+so model thinking continues to stream live in its separate UI channel.
+
 ## Workflow
 
 The planner returns a validated `PlannerDecision`, never an `ACTION:` string.
@@ -106,12 +144,25 @@ Supported actions are:
 
 The workflow itself enforces the multi-turn sequences:
 
-- A named general organ goes directly to one VoxTell request.
+- Before segmentation, the existing Qwen instance classifies each prompt as an
+  `anatomical_concept`, `pathological_structure`, or `clinical_description`.
+  Anatomical aliases such as `eye_L` can become `left eye`; validated pathology
+  phrases and report descriptions retain their original wording.
+  For example, `iver` becomes the anatomical prompt `liver`, `bladder
+  carcinoma` remains a pathological-structure prompt, and `Bronchial carcinoma
+  in the right upper lobe with pleural contact` remains one complete clinical
+  description.
+- A named general organ or specific pathological structure goes directly to one
+  VoxTell request. A generic bare `tumor`, `mass`, or `lesion` still triggers the
+  spatial-description dialogue.
 - OAR contouring confirms or corrects the treatment site, retrieves its protocol
   once, and sends the complete OAR list in one batch.
 - Tumor contouring requests spatial information when it is missing, handles an
   uncertain blind attempt explicitly, and only refines a first mask after a
-  positive location confirmation.
+  positive location confirmation. If the user cannot supply any location, the
+  blind attempt sends the report-style prompt `carcinoma` to VoxTell while the
+  viewer label remains the user's original `tumor`/`mass`/`lesion` wording; the
+  resulting mask is marked exploratory and does not imply a diagnosis.
 - Follow-up questions receive only validated artifacts belonging to the current
   case and can use mask overlays as visual context.
 - QC compares non-target contours with a second model. Clinical target volumes

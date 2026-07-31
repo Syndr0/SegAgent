@@ -7,6 +7,7 @@ from typing import Protocol
 
 import numpy as np
 
+from .batching import predict_structure_chunks
 from .imaging import VolumeData, load_volume
 
 
@@ -26,9 +27,15 @@ class VoxTellBackend:
 
     name = "VoxTell"
 
-    def __init__(self, model_dir: Path | None, device: str = "auto"):
+    def __init__(
+        self,
+        model_dir: Path | None,
+        device: str = "auto",
+        batch_size: int = 4,
+    ):
         self.model_dir = Path(model_dir) if model_dir else None
         self.device_name = device
+        self.batch_size = max(1, int(batch_size))
         self.version = self.model_dir.name if self.model_dir else "unconfigured"
         self._predictor = None
         self._lock = threading.RLock()
@@ -66,8 +73,12 @@ class VoxTellBackend:
         predictor = self._ensure()
         with self._lock:
             image, _ = NibabelIOWithReorient().read_images([str(image_path)])
-            masks = predictor.predict_single_image(image, structures)
-        array = np.asarray(masks, dtype=np.uint8)
+            array = predict_structure_chunks(
+                predictor.predict_single_image,
+                image,
+                structures,
+                self.batch_size,
+            )
         if array.ndim == 4:
             array = array.transpose(0, 3, 2, 1)  # (N, z, y, x) -> (N, x, y, z)
         if array.shape != (len(structures), *volume.data.shape):

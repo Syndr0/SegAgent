@@ -3,7 +3,14 @@ from __future__ import annotations
 import re
 
 from .intent import match_canonical_terms
-from .schemas import DialogueStage, Intent, PlannerAction, PlannerDecision
+from .prompts import is_generic_pathology_prompt
+from .schemas import (
+    DialogueStage,
+    Intent,
+    PlannerAction,
+    PlannerDecision,
+    TargetType,
+)
 
 """Deterministic dialogue rules for the tumor and OAR workflows.
 
@@ -105,6 +112,26 @@ def _fired(state, gate: str) -> bool:
     return gate in (state.get("gates_fired") or [])
 
 
+def _normalized_initial_target(state) -> dict | None:
+    items = list(state.get("prompt_normalizations") or [])
+    if len(items) != 1:
+        return None
+    item = items[0]
+    category = item.get("category")
+    prompt = " ".join(str(item.get("voxtell_prompt") or "").split())
+    if not prompt:
+        return None
+    # A category mistake must never make a bare target name (including
+    # numbered instances such as "tumor 2") bypass the spatial-detail gate.
+    if is_generic_pathology_prompt(prompt):
+        return None
+    if category == "clinical_description":
+        return item
+    if category == "pathological_structure":
+        return item
+    return None
+
+
 def gtv_spatial_gate(state, organ_names=()) -> PlannerDecision | None:
     """A tumor request with no spatial description must ask for one first.
 
@@ -118,6 +145,11 @@ def gtv_spatial_gate(state, organ_names=()) -> PlannerDecision | None:
     described = " ".join(
         filter(None, [intent_data.get("source_description"), state.get("question")])
     )
+    # VoxTell also has a strong short-phrase regime for named pathological
+    # structures (for example "bladder carcinoma"). Do not discard that
+    # validated phrase in favor of the exploratory blind prompt.
+    if _normalized_initial_target(state) is not None:
+        return None
     if has_spatial_detail(described, organ_names):
         return None
     return PlannerDecision(
@@ -128,8 +160,9 @@ def gtv_spatial_gate(state, organ_names=()) -> PlannerDecision | None:
             "Where is the tumor, roughly? Anything you can give helps: which organ "
             "or region it sits in, which side, its approximate size or shape, or "
             "which structures it lies next to. If you would rather I try without "
-            "that, say you are not sure and I will make a first attempt for you to "
-            "check."
+            "that, say you are not sure and I will make an exploratory first "
+            "attempt using a generic report-style prompt. That prompt is only a "
+            "search aid, not a diagnosis."
         ),
         gate="gtv_spatial",
     )
@@ -390,7 +423,10 @@ def pre_plan_gate(state, organ_names=(), has_contours: bool = False) -> PlannerD
     )
 
 
-TUMOR_PROMPT = "tumor"
+# VoxTell was trained on report-derived language, so this deliberately uses a
+# report-style pathology noun for the user-confirmed blind search. It must never
+# replace the user's wording during ordinary normalization or imply histology.
+TUMOR_PROMPT = "carcinoma"
 
 # Stages the workflow dictates. Named constants rather than prose so the caller
 # can branch on them safely (a stage decides the target type and which marker is
@@ -403,7 +439,7 @@ STAGE_OAR_FULL = "oar_full"
 
 STAGE_LABELS = {
     STAGE_TUMOR_INITIAL: "first target contour from the supplied spatial description",
-    STAGE_TUMOR_BLIND: "first attempt with a fixed prompt",
+    STAGE_TUMOR_BLIND: "exploratory first attempt with a report-style prompt",
     STAGE_TUMOR_NEIGHBOURS: "contouring neighbouring organs to locate the target",
     STAGE_TUMOR_REFINE: "re-contouring the target with a spatial prompt",
     STAGE_OAR_FULL: "contouring the confirmed protocol's full structure list",
@@ -522,7 +558,10 @@ def required_workflow_decision(
         if answers.get("gtv_blind_attempt"):
             return PlannerDecision(
                 action=PlannerAction.SEGMENT,
-                rationale_summary="Make the requested first target attempt with the fixed fallback prompt.",
+                rationale_summary=(
+                    "Make an exploratory first target attempt with the fixed "
+                    "report-style fallback prompt; this is not a diagnosis."
+                ),
                 confidence=1.0,
                 structures=[TUMOR_PROMPT],
                 workflow_stage=DialogueStage.TUMOR_BLIND,
@@ -533,6 +572,17 @@ def required_workflow_decision(
             or state.get("question")
             or ""
         )
+        normalized_target = _normalized_initial_target(state)
+        if normalized_target is not None:
+            return PlannerDecision(
+                action=PlannerAction.SEGMENT,
+                rationale_summary=(
+                    "Contour the normalized pathological/report target prompt."
+                ),
+                confidence=1.0,
+                structures=[normalized_target["voxtell_prompt"]],
+                workflow_stage=DialogueStage.TUMOR_INITIAL,
+            )
         if has_spatial_detail(str(description), organ_names):
             return PlannerDecision(
                 action=PlannerAction.SEGMENT,
@@ -588,14 +638,32 @@ def _measurements(observations) -> list[dict]:
         data = item.get("data") or {}
         result = data.get("segment_result")
         if isinstance(result, dict):
+            request = result.get("request") or {}
+            target_type = request.get("target_type") or data.get("target_type")
             rows.extend(
-                row for row in result.get("measurements", []) or [] if row.get("found")
+                {
+                    **row,
+                    "_target_type": target_type,
+                }
+                for row in result.get("measurements", []) or []
+                if row.get("found")
             )
     return rows
 
 
 def _is_tumor_row(row) -> bool:
-    return bool(re.search(r"(?<![a-z])(tumou?r|gtv|lesion|mass)(?![a-z])", row.get("structure", ""), re.IGNORECASE))
+    if row.get("_target_type") == TargetType.GTV.value:
+        return True
+    return bool(
+        re.search(
+            r"(?<![a-z])(?:"
+            r"tumou?rs?|lesions?|mass(?:es)?|carcinomas?"
+            r"|(?:i?gtv|ctv|ptv|itv)(?:p|n|pn)?\d*"
+            r")(?![a-z])",
+            row.get("structure", ""),
+            re.IGNORECASE,
+        )
+    )
 
 
 def tumor_measurement(observations) -> dict | None:
@@ -751,8 +819,9 @@ def apply_reply(state, gate: str, reply: str, organ_names=(), site_aliases=None)
 
     elif gate == "gtv_spatial":
         if mood == "unknown" or not has_spatial_detail(reply, organ_names):
-            # No usable description: fall back to a bare prompt and confirm the
-            # result with the user rather than guessing at a location.
+            # No usable description: use the fixed exploratory report-language
+            # prompt and confirm the result rather than guessing at a location
+            # or presenting the prompt as a diagnosis.
             answers["gtv_blind_attempt"] = True
         else:
             answers["gtv_description"] = reply

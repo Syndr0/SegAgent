@@ -103,13 +103,29 @@ class SegmentationTool:
         warnings: list[str] = []
         voxel_ml = float(np.prod(volume.spacing) / 1000.0)
         for index, structure in enumerate(request.structures):
+            normalization = (
+                request.prompt_normalizations[index]
+                if index < len(request.prompt_normalizations)
+                else None
+            )
+            display_structure = (
+                normalization.source_text
+                if normalization is not None and normalization.exploratory
+                else structure
+            )
             mask = np.asarray(masks[index], dtype=bool)
             voxels, bbox, centroid = mask_geometry(mask)
             if voxels == 0:
                 measurements.append(
-                    StructureMeasurement(structure=structure, found=False, voxels=0)
+                    StructureMeasurement(
+                        structure=display_structure,
+                        found=False,
+                        voxels=0,
+                    )
                 )
-                warnings.append(f'No voxels were returned for "{structure}".')
+                warnings.append(
+                    f'No voxels were returned for "{display_structure}".'
+                )
                 continue
             artifact_id, mask_path = self.store.allocate_artifact_path(
                 request.case_id, ".nii.gz"
@@ -120,7 +136,7 @@ class SegmentationTool:
                 artifact_id,
                 mask_path,
                 "mask",
-                structure,
+                display_structure,
                 "application/gzip",
                 {
                     "source_model": self.backend.name,
@@ -128,6 +144,25 @@ class SegmentationTool:
                     "artifact_version": 1,
                     "purpose": request.purpose,
                     "target_type": request.target_type.value,
+                    "source_prompt": (
+                        normalization.source_text if normalization else structure
+                    ),
+                    "voxtell_prompt": structure,
+                    "prompt_category": (
+                        normalization.category.value if normalization else None
+                    ),
+                    "prompt_normalized_by": (
+                        normalization.normalized_by if normalization else None
+                    ),
+                    "prompt_normalization_confidence": (
+                        normalization.confidence if normalization else None
+                    ),
+                    "prompt_fallback_reason": (
+                        normalization.fallback_reason if normalization else None
+                    ),
+                    "prompt_exploratory": (
+                        normalization.exploratory if normalization else False
+                    ),
                 },
             )
             overlays = []
@@ -142,14 +177,24 @@ class SegmentationTool:
                         overlay_id,
                         overlay_path,
                         "overlay",
-                        f"{structure}, axial z={z}",
+                        f"{display_structure}, axial z={z}",
                         "image/png",
-                        {"structure": structure, "slice_index": z, "mask_id": mask_ref.artifact_id},
+                        {
+                            "structure": display_structure,
+                            "voxtell_prompt": structure,
+                            "slice_index": z,
+                            "mask_id": mask_ref.artifact_id,
+                            "prompt_exploratory": (
+                                normalization.exploratory
+                                if normalization
+                                else False
+                            ),
+                        },
                     )
                 )
             measurements.append(
                 StructureMeasurement(
-                    structure=structure,
+                    structure=display_structure,
                     found=True,
                     voxels=voxels,
                     volume_ml=round(voxels * voxel_ml, 3),
@@ -233,6 +278,39 @@ class MaskInspectionTool:
                 return item
         for item in reversed(candidates):
             if item.label.casefold() == wanted:
+                return item
+        # A normalized model prompt may deliberately differ from what the user
+        # typed (for example, ``eye_L`` becomes ``left eye``). Preserve exact
+        # source-prompt lookup so a later turn can still use the user's original
+        # name rather than depending on the mask being selected in the viewer.
+        for item in reversed(candidates):
+            source_prompt = item.metadata.get("source_prompt")
+            if (
+                isinstance(source_prompt, str)
+                and " ".join(source_prompt.strip().split()).casefold() == wanted
+            ):
+                return item
+
+        # Finally resolve only conservative canonical aliases. ``canonical_roi``
+        # normalizes separators and explicit side aliases but intentionally does
+        # no substring or fuzzy matching, so ``eye`` cannot select ``left eye``.
+        from .qc import canonical_roi
+
+        canonical_wanted = canonical_roi(name)
+        if not canonical_wanted:
+            return None
+        for item in reversed(candidates):
+            aliases = [
+                item.label,
+                item.metadata.get("source_prompt"),
+                item.metadata.get("voxtell_prompt"),
+            ]
+            if any(
+                isinstance(alias, str)
+                and alias.strip()
+                and canonical_roi(alias) == canonical_wanted
+                for alias in aliases
+            ):
                 return item
         return None
 

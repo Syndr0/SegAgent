@@ -11,7 +11,7 @@ scipy>=1.12
 torch>=2.3,<2.9
 # Qwen3.5 support and its cached Gated-DeltaNet fixes are in Transformers v5.
 transformers>=5.7,<6
-qwen-vl-utils>=0.0.8
+qwen-vl-utils>=0.0.14
 accelerate>=0.33
 langgraph>=1,<2
 langgraph-checkpoint-sqlite>=2,<4

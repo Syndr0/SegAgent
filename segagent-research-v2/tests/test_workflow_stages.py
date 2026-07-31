@@ -32,6 +32,19 @@ def observation(*measurements: dict) -> dict:
     }
 
 
+def typed_observation(target_type: str, *measurements: dict) -> dict:
+    return {
+        "tool": "segment",
+        "data": {
+            "target_type": target_type,
+            "segment_result": {
+                "request": {"target_type": target_type},
+                "measurements": list(measurements),
+            },
+        },
+    }
+
+
 def found(structure: str, centroid, volume_ml=10.0) -> dict:
     return {
         "structure": structure,
@@ -83,8 +96,31 @@ class QcStageTests(unittest.TestCase):
 class TumorStageTests(unittest.TestCase):
     def test_blind_attempt_uses_the_fixed_prompt(self) -> None:
         state = {"intent": {"intent": "gtv"}, "answers": {"gtv_blind_attempt": True}}
-        structures, _ = forced_structures(state, PROTOCOL, [])
-        self.assertEqual(structures, ["tumor"])
+        structures, stage = forced_structures(state, PROTOCOL, [])
+        self.assertEqual(structures, ["carcinoma"])
+        self.assertEqual(stage, STAGE_TUMOR_BLIND)
+
+        decision = required_workflow_decision(state, PROTOCOL, [], PROTOCOL)
+        self.assertEqual(decision.action, PlannerAction.SEGMENT)
+        self.assertEqual(decision.structures, ["carcinoma"])
+        self.assertEqual(decision.workflow_stage.value, STAGE_TUMOR_BLIND)
+
+    def test_spatial_target_keeps_user_description_for_initial_attempt(self) -> None:
+        description = "tumor in the right upper lobe"
+        state = {
+            "question": f"segment {description}",
+            "intent": {
+                "intent": "gtv",
+                "source_description": description,
+            },
+            "answers": {},
+        }
+
+        decision = required_workflow_decision(state, PROTOCOL, [], PROTOCOL)
+
+        self.assertEqual(decision.action, PlannerAction.SEGMENT)
+        self.assertEqual(decision.structures, [description])
+        self.assertEqual(decision.workflow_stage.value, "tumor_initial")
 
     def test_after_confirmation_neighbouring_organs_are_contoured(self) -> None:
         state = {
@@ -98,7 +134,7 @@ class TumorStageTests(unittest.TestCase):
 
     def test_after_neighbours_the_target_is_re_prompted_spatially(self) -> None:
         observations = [
-            observation(found("tumor", [250.0, 200.0, 60.0], 33.1)),
+            observation(found("carcinoma", [250.0, 200.0, 60.0], 33.1)),
             observation(
                 found("larynx", [250.0, 200.0, 40.0]),
                 found("mandible", [250.0, 240.0, 62.0]),
@@ -126,6 +162,31 @@ class TumorStageTests(unittest.TestCase):
 
 
 class TumorPromptTests(unittest.TestCase):
+    def test_refinement_uses_typed_gtv_even_when_display_label_varies(self) -> None:
+        for label in (
+            "multiple lesions",
+            "masses",
+            "carcinomas",
+            "GTVp",
+            "possible abnormality",
+        ):
+            with self.subTest(label=label):
+                observations = [
+                    typed_observation(
+                        "gtv",
+                        found(label, [250.0, 200.0, 60.0], 33.1),
+                    ),
+                    typed_observation(
+                        "organ",
+                        found("larynx", [250.0, 200.0, 40.0]),
+                    ),
+                ]
+
+                prompt = build_tumor_prompt(observations)
+
+                self.assertIsNotNone(prompt)
+                self.assertIn("larynx", prompt)
+
     def test_prompt_names_the_nearest_organ_and_a_direction(self) -> None:
         observations = [
             observation(found("tumor", [250.0, 200.0, 60.0], 33.1)),
