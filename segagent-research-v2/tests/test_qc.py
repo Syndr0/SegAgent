@@ -1,7 +1,8 @@
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -17,6 +18,7 @@ from backend.qc import (
     dice,
     is_target,
     nearest_surface_distance_mm,
+    roi_role,
     target_class,
 )
 from backend.schemas import ArtifactRef, Intent, PlannerAction
@@ -34,6 +36,10 @@ class TargetClassificationTests(unittest.TestCase):
 
     def test_target_subclass_returns_base_class(self) -> None:
         self.assertEqual(target_class("GTVp"), "GTV")
+        self.assertEqual(target_class("GTVnd"), "GTV")
+        self.assertEqual(target_class("GTVnx"), "GTV")
+        self.assertEqual(target_class("GTVrn"), "GTV")
+        self.assertEqual(target_class("GTVrpn"), "GTV")
         self.assertEqual(target_class("CTVn_54Gy"), "CTV")
         self.assertEqual(target_class("PTVp"), "PTV")
 
@@ -45,6 +51,46 @@ class TargetClassificationTests(unittest.TestCase):
         # Word-boundary matching keeps these out of the target branch.
         self.assertFalse(is_target("rectum"))
         self.assertFalse(is_target("optic chiasm"))
+        self.assertFalse(is_target("GTVelocity"))
+
+
+class RoiRoleClassificationTests(unittest.TestCase):
+    def test_auxiliary_structures_are_not_organs(self) -> None:
+        for label in (
+            "FAN",
+            "BODY",
+            "EXTERNAL",
+            "couch",
+            "bolus",
+            "Ring_5mm",
+            "SpinalCord_PRV05",
+            "GTV_ring_5mm",
+        ):
+            self.assertEqual(roi_role(label), "auxiliary", label)
+
+    def test_targets_organs_and_unknowns_remain_distinct(self) -> None:
+        self.assertEqual(roi_role("GTVnd"), "target")
+        self.assertEqual(roi_role("GTVnx"), "target")
+        self.assertEqual(roi_role("GTVrn"), "target")
+        self.assertEqual(roi_role("skin"), "organ")
+        self.assertEqual(roi_role("left kidney"), "organ")
+        self.assertEqual(roi_role("external auditory canal"), "unclassified")
+        self.assertEqual(roi_role("body of pancreas"), "unclassified")
+        self.assertEqual(roi_role("mystery ROI"), "unclassified")
+
+    def test_structured_role_metadata_has_priority(self) -> None:
+        self.assertEqual(
+            roi_role("Primary", {"roi_interpreted_type": "GTV"}),
+            "target",
+        )
+        self.assertEqual(
+            roi_role("custom", {"roi_interpreted_type": "ORGAN"}),
+            "organ",
+        )
+        self.assertEqual(
+            roi_role("custom", {"roi_interpreted_type": "EXTERNAL"}),
+            "auxiliary",
+        )
 
 
 class CanonicalRoiTests(unittest.TestCase):
@@ -137,6 +183,16 @@ class CompletenessTests(unittest.TestCase):
         self.assertNotIn("prostate", result.missing)
         self.assertEqual(result.applicability.source_status, "research_seed")
 
+    def test_auxiliary_target_and_unknown_do_not_count_as_protocol_organs(self) -> None:
+        result = self.engine._completeness(
+            self.case("bladder", "FAN", "GTVnd", "mystery ROI"),
+            "pelvis",
+        )
+        self.assertIn("bladder", result.present)
+        self.assertNotIn("FAN", result.unmatched_contours)
+        self.assertNotIn("GTVnd", result.unmatched_contours)
+        self.assertNotIn("mystery ROI", result.unmatched_contours)
+
 
 class QCArtifactProvenanceTests(unittest.TestCase):
     def test_comparison_metrics_link_both_masks_and_difference_overlay(self) -> None:
@@ -208,6 +264,90 @@ class QCArtifactProvenanceTests(unittest.TestCase):
         self.assertIn(overlay.artifact_id, dice_evidence.artifact_ids)
 
 
+class QCRoleRoutingTests(unittest.TestCase):
+    def test_only_confirmed_organs_are_sent_to_comparison_model(self) -> None:
+        data = np.zeros((4, 4, 4), dtype=np.float32)
+        mask = np.zeros_like(data, dtype=bool)
+        mask[1:3, 1:3, 1:3] = True
+        volume = SimpleNamespace(
+            data=data,
+            affine=np.eye(4),
+            spacing=(1.0, 1.0, 1.0),
+        )
+        image = ArtifactRef(
+            artifact_id="artifact_000000000100",
+            case_id="case_000000000100",
+            kind="image",
+            label="image.nii.gz",
+            media_type="application/gzip",
+            sha256="a" * 64,
+        )
+        labels = ("left kidney", "GTVnd", "FAN", "mystery ROI")
+        contours = [
+            ArtifactRef(
+                artifact_id=f"artifact_{index + 101:012x}",
+                case_id=image.case_id,
+                kind="contour",
+                label=label,
+                media_type="application/gzip",
+                sha256=f"{index + 1:x}" * 64,
+            )
+            for index, label in enumerate(labels)
+        ]
+        case = SimpleNamespace(
+            image=image,
+            contours=contours,
+            artifacts=[image, *contours],
+            metadata={},
+        )
+
+        class Store:
+            @staticmethod
+            def get_case(_case_id):
+                return case
+
+            @staticmethod
+            def artifact_path(ref):
+                return ref.artifact_id
+
+        class Backend:
+            name = "comparison-model"
+            version = "v1"
+            calls = []
+
+            @classmethod
+            def segment(cls, _image_path, names):
+                cls.calls.append(list(names))
+                return volume, np.asarray([mask for _ in names])
+
+        engine = ContourQCEngine(
+            store=Store(),
+            backend=Backend(),
+            knowledge=None,
+            with_surface=False,
+        )
+        engine._persist_comparison_artifacts = lambda **_kwargs: (None, [])
+        imaging = ModuleType("backend.imaging")
+        imaging.load_volume = lambda _path: volume
+        imaging.load_mask = lambda _path, _volume: mask
+        imaging.mask_geometry = lambda _mask: (
+            int(np.count_nonzero(mask)),
+            [[1, 1, 1], [2, 2, 2]],
+            [1.5, 1.5, 1.5],
+        )
+        with patch.dict(sys.modules, {"backend.imaging": imaging}):
+            report = engine.run(image.case_id)
+
+        self.assertEqual(Backend.calls, [["left kidney"]])
+        self.assertEqual([item.structure for item in report.comparisons], ["left kidney"])
+        self.assertEqual([item.structure for item in report.targets], ["GTVnd"])
+        self.assertEqual([item.structure for item in report.auxiliaries], ["FAN"])
+        self.assertEqual(
+            [item.structure for item in report.unclassified],
+            ["mystery ROI"],
+        )
+
+
 class ReportReadinessTests(unittest.TestCase):
     @staticmethod
     def case(*labels: str):
@@ -250,6 +390,12 @@ class ReportReadinessTests(unittest.TestCase):
         )
         result = assess_report_readiness(case, scope="available")
         self.assertFalse(result.ready)
+
+    def test_auxiliary_structure_does_not_unlock_report(self) -> None:
+        result = assess_report_readiness(self.case("FAN"), scope="available")
+        self.assertFalse(result.ready)
+        self.assertEqual(result.organ_count, 0)
+        self.assertEqual(result.target_count, 0)
 
     def test_human_edit_supersedes_stale_and_repeat_masks(self) -> None:
         artifacts = [

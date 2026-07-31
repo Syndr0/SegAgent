@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -15,8 +15,10 @@ from .schemas import (
     ProtocolApplicability,
     QCCompleteness,
     QCComparison,
+    QCAuxiliaryNote,
     QCReport,
     QCTargetNote,
+    QCUnclassifiedNote,
     ReportEvidenceBundle,
     ReportReadiness,
     ReportStructureEvidence,
@@ -26,13 +28,12 @@ from .storage import ResearchStore
 
 # Target volumes are clinical constructs: an anatomy model cannot confirm or
 # refute them, so they are described rather than compared.
-# The token expression deliberately recognizes common target subclasses
-# (GTVp/GTVn/CTVn/PTVp, numbered targets, and iGTV) while refusing arbitrary
-# words that merely contain those letters.
+# A target base is already a strong, bounded RT name.  Admit the compact
+# qualifiers used by this project (for example GTVnd, GTVnx, GTVrn, GTVrpn)
+# without turning arbitrary words such as "GTVelocity" into targets.
 TARGET_TOKEN = re.compile(
     r"^(?P<class>igtv|gtv|ctv|ptv|itv)"
-    r"(?:(?:p|n|pn)(?:\d+)?)?"
-    r"(?:(?:\d+(?:\.\d+)?)(?:gy)?)?$",
+    r"(?:(?:p|n|pn|nd|nx|rn|rpn)\d*)?$",
     re.IGNORECASE,
 )
 TARGET_WORDS = {"boost", "靶区", "肿瘤区", "临床靶区", "计划靶区"}
@@ -58,6 +59,7 @@ ROI_ALIASES = {
     "kidney right": "right kidney",
     "lung left": "left lung",
     "lung right": "right lung",
+    "small intestine": "small bowel",
 }
 SIDE_SUFFIXES = {
     "l": "left",
@@ -74,6 +76,128 @@ ROI_BASE_ALIASES = {
     "opticnrv": "optic nerve",
     "optic nerve": "optic nerve",
     "adrenal": "adrenal gland",
+}
+
+# Exact anatomical vocabulary used for role classification when structured
+# DICOM role metadata is unavailable.  The protocol registry extends this set
+# at runtime; these entries keep standalone report/QC helpers deterministic.
+DEFAULT_KNOWN_ANATOMY = {
+    "anal canal",
+    "aorta",
+    "bladder",
+    "brain",
+    "brainstem",
+    "cauda equina",
+    "cervix",
+    "colon",
+    "duodenum",
+    "esophagus",
+    "gallbladder",
+    "heart",
+    "inferior vena cava",
+    "larynx",
+    "left adrenal gland",
+    "left cochlea",
+    "left eye",
+    "left femoral head",
+    "left hippocampus",
+    "left humeral head",
+    "left kidney",
+    "left lens",
+    "left lung",
+    "left optic nerve",
+    "left ovary",
+    "left parotid gland",
+    "left submandibular gland",
+    "liver",
+    "mandible",
+    "optic chiasm",
+    "oral cavity",
+    "pancreas",
+    "penile bulb",
+    "pituitary gland",
+    "prostate",
+    "pulmonary artery",
+    "rectum",
+    "right adrenal gland",
+    "right cochlea",
+    "right eye",
+    "right femoral head",
+    "right hippocampus",
+    "right humeral head",
+    "right kidney",
+    "right lens",
+    "right lung",
+    "right optic nerve",
+    "right ovary",
+    "right parotid gland",
+    "right submandibular gland",
+    "sacrum",
+    "seminal vesicles",
+    "sigmoid colon",
+    "skin",
+    "small bowel",
+    "spinal cord",
+    "spleen",
+    "stomach",
+    "superior vena cava",
+    "thyroid gland",
+    "trachea",
+    "urethra",
+    "uterus",
+    "vagina",
+}
+
+# These are non-anatomical or derived planning structures.  ``fan`` is an
+# explicit local mapping for the contour convention used by this project; keep
+# institution-specific aliases centralized rather than guessing from volume.
+AUXILIARY_EXACT = {
+    "body": "external",
+    "external": "external",
+    "external contour": "external",
+    "patient outline": "external",
+    "fan": "institutional_helper",
+    "couch": "support",
+    "couch surface": "support",
+    "table": "support",
+    "treatment table": "support",
+    "bolus": "bolus",
+    "isocenter": "isocenter",
+}
+AUXILIARY_PREFIXES = {
+    "avoid": "avoidance",
+    "avoidance": "avoidance",
+    "bolus": "bolus",
+    "couch": "support",
+    "control": "control",
+    "dose": "dose_region",
+    "fiducial": "marker",
+    "fixation": "fixation",
+    "flash": "optimization",
+    "helper": "helper",
+    "immobilization": "fixation",
+    "immobilisation": "fixation",
+    "isodose": "dose_region",
+    "junction": "optimization",
+    "marker": "marker",
+    "matchline": "optimization",
+    "optimization": "optimization",
+    "ring": "optimization",
+    "shell": "optimization",
+    "support": "support",
+}
+AUXILIARY_INTERPRETED_TYPES = {
+    "avoidance": "avoidance",
+    "bolus": "bolus",
+    "control": "control",
+    "dose region": "dose_region",
+    "dose_region": "dose_region",
+    "external": "external",
+    "fixation": "fixation",
+    "isocenter": "isocenter",
+    "marker": "marker",
+    "registration": "registration",
+    "support": "support",
 }
 
 MALE_ONLY_ROIS = {
@@ -133,6 +257,81 @@ def target_class(label: str) -> str | None:
 
 def is_target(label: str) -> bool:
     return target_class(label) is not None
+
+
+def auxiliary_class(label: str, metadata: dict | None = None) -> str | None:
+    """Return a conservative auxiliary subtype, never inferred from geometry."""
+
+    metadata = metadata or {}
+    for key in (
+        "roi_role",
+        "roi_interpreted_type",
+        "dicom_interpreted_type",
+        "interpreted_type",
+    ):
+        raw = str(metadata.get(key) or "").strip().casefold()
+        normalized_type = re.sub(r"[\s_-]+", " ", raw)
+        if normalized_type in AUXILIARY_INTERPRETED_TYPES:
+            return AUXILIARY_INTERPRETED_TYPES[normalized_type]
+        if normalized_type in {"auxiliary", "helper", "planning"}:
+            return "helper"
+
+    normalized = canonical_roi(label)
+    if normalized in AUXILIARY_EXACT:
+        return AUXILIARY_EXACT[normalized]
+    tokens = normalized.split()
+    for token in tokens:
+        if re.fullmatch(r"(?:prv|[a-z0-9]+prv)\d*", token):
+            return "prv"
+        for prefix, subtype in AUXILIARY_PREFIXES.items():
+            if re.fullmatch(rf"{re.escape(prefix)}\d*", token):
+                return subtype
+    return None
+
+
+def roi_role(
+    label: str,
+    metadata: dict | None = None,
+    known_anatomy: set[str] | None = None,
+) -> Literal["organ", "target", "auxiliary", "unclassified"]:
+    """Classify one ROI without equating every non-target name with an organ."""
+
+    metadata = metadata or {}
+    explicit = str(
+        metadata.get("roi_role")
+        or metadata.get("target_type")
+        or metadata.get("roi_interpreted_type")
+        or metadata.get("dicom_interpreted_type")
+        or ""
+    ).strip()
+    lowered = re.sub(r"[\s_-]+", " ", explicit.casefold())
+    if lowered in {"organ", "oar"}:
+        return "organ"
+    if lowered in {"auxiliary", "helper", "planning"} or (
+        lowered in AUXILIARY_INTERPRETED_TYPES
+    ):
+        return "auxiliary"
+    if lowered in {
+        "gtv",
+        "ctv",
+        "ptv",
+        "itv",
+        "target",
+        "treated volume",
+        "irrad volume",
+    } or target_class(explicit):
+        return "target"
+
+    # Strong auxiliary tokens take precedence over a target-looking prefix for
+    # derived names such as GTV_ring_5mm.
+    if auxiliary_class(label, metadata):
+        return "auxiliary"
+    if is_target(label):
+        return "target"
+    known = {canonical_roi(item) for item in (known_anatomy or DEFAULT_KNOWN_ANATOMY)}
+    if canonical_roi(label) in known:
+        return "organ"
+    return "unclassified"
 
 
 def dice(a: np.ndarray, b: np.ndarray) -> float:
@@ -296,10 +495,10 @@ def _protocol_source_status(source: str) -> str:
 class ContourQCEngine:
     """Compare uploaded contours with an independent model contour of the same name.
 
-    Three separate things are produced, and they are deliberately different in
-    kind: a geometric comparison for organs, a description for target volumes,
-    and a set difference against the site protocol for completeness. None of
-    them is a clinical judgement about the plan.
+    Outputs are deliberately role-specific: geometric comparison for confirmed
+    organs, geometry-only descriptions for targets, inventory-only handling for
+    auxiliary/unclassified structures, and a protocol set difference for
+    completeness. None is a clinical judgement about the plan.
     """
 
     def __init__(
@@ -313,6 +512,13 @@ class ContourQCEngine:
         self.backend = backend
         self.knowledge = knowledge
         self.with_surface = with_surface
+        self.known_anatomy = set(DEFAULT_KNOWN_ANATOMY)
+        for protocol in getattr(knowledge, "protocols", []) or []:
+            self.known_anatomy.update(
+                canonical_roi(str(item))
+                for item in protocol.get("oars", []) or []
+                if item
+            )
 
     def _persist_comparison_artifacts(
         self, case_id, volume, uploaded_ref, uploaded_mask, model_mask, warnings
@@ -424,8 +630,30 @@ class ContourQCEngine:
         voxel_ml = float(np.prod(volume.spacing) / 1000.0)
         warnings: list[str] = []
 
-        organs = [item for item in case.contours if not is_target(item.label)]
-        targets = [item for item in case.contours if is_target(item.label)]
+        classified = {
+            item.artifact_id: roi_role(
+                item.label,
+                getattr(item, "metadata", {}) or {},
+                self.known_anatomy,
+            )
+            for item in case.contours
+        }
+        organs = [
+            item for item in case.contours
+            if classified[item.artifact_id] == "organ"
+        ]
+        targets = [
+            item for item in case.contours
+            if classified[item.artifact_id] == "target"
+        ]
+        auxiliaries = [
+            item for item in case.contours
+            if classified[item.artifact_id] == "auxiliary"
+        ]
+        unclassified = [
+            item for item in case.contours
+            if classified[item.artifact_id] == "unclassified"
+        ]
 
         loaded: dict[str, np.ndarray] = {}
         for ref in case.contours:
@@ -446,12 +674,30 @@ class ContourQCEngine:
         target_notes, target_evidence = self._describe_targets(
             volume, voxel_ml, targets, organs, loaded, case.image.artifact_id
         )
+        auxiliary_notes, auxiliary_evidence = self._describe_auxiliaries(
+            volume, voxel_ml, auxiliaries, loaded, case.image.artifact_id
+        )
+        unclassified_notes, unclassified_evidence = self._describe_unclassified(
+            volume, voxel_ml, unclassified, loaded, case.image.artifact_id
+        )
         completeness = self._completeness(case, site_query)
 
-        summary = {"ok": 0, "warn": 0, "error": 0}
+        summary = {
+            "ok": 0,
+            "warn": 0,
+            "error": 0,
+            "target": len(target_notes),
+            "auxiliary": len(auxiliary_notes),
+            "unclassified": len(unclassified_notes),
+        }
         for item in comparisons:
             summary[item.status] = summary.get(item.status, 0) + 1
-        metric_evidence = [*comparison_evidence, *target_evidence]
+        metric_evidence = [
+            *comparison_evidence,
+            *target_evidence,
+            *auxiliary_evidence,
+            *unclassified_evidence,
+        ]
         if (
             completeness
             and completeness.applicability
@@ -477,6 +723,8 @@ class ContourQCEngine:
             case_id=case_id,
             comparisons=comparisons,
             targets=target_notes,
+            auxiliaries=auxiliary_notes,
+            unclassified=unclassified_notes,
             completeness=completeness,
             summary=summary,
             metric_evidence=metric_evidence,
@@ -780,6 +1028,96 @@ class ContourQCEngine:
                     evidence.append(item)
         return notes, evidence
 
+    def _describe_auxiliaries(
+        self, volume, voxel_ml, auxiliaries, loaded, image_artifact_id
+    ) -> tuple[list[QCAuxiliaryNote], list[MetricEvidence]]:
+        """Inventory helper/planning ROIs without asking the anatomy model."""
+
+        from .imaging import mask_geometry
+
+        notes: list[QCAuxiliaryNote] = []
+        evidence: list[MetricEvidence] = []
+        for ref in auxiliaries:
+            metadata = getattr(ref, "metadata", {}) or {}
+            subtype = auxiliary_class(ref.label, metadata) or "helper"
+            structured = any(
+                metadata.get(key)
+                for key in (
+                    "roi_role",
+                    "roi_interpreted_type",
+                    "dicom_interpreted_type",
+                    "interpreted_type",
+                )
+            )
+            if structured:
+                source = "artifact_metadata"
+            elif canonical_roi(ref.label) == "fan":
+                source = "institution_mapping"
+            else:
+                source = "bounded_label_rule"
+            volume_ml = None
+            mask = loaded.get(ref.artifact_id)
+            if mask is not None:
+                voxels, _, _ = mask_geometry(mask)
+                volume_ml = round(voxels * voxel_ml, 3)
+            note = QCAuxiliaryNote(
+                structure=ref.label,
+                canonical_roi=canonical_roi(ref.label),
+                auxiliary_class=subtype,
+                classification_source=source,
+                artifact_id=ref.artifact_id,
+                volume_ml=volume_ml,
+            )
+            notes.append(note)
+            item = _evidence(
+                evidence_id=f"qc:{ref.artifact_id}:auxiliary_volume",
+                structure=ref.label,
+                metric="volume",
+                value=volume_ml,
+                unit="mL",
+                source="uploaded auxiliary contour",
+                artifact_ids=[ref.artifact_id, image_artifact_id],
+            )
+            if item:
+                evidence.append(item)
+        return notes, evidence
+
+    def _describe_unclassified(
+        self, volume, voxel_ml, structures, loaded, image_artifact_id
+    ) -> tuple[list[QCUnclassifiedNote], list[MetricEvidence]]:
+        """Measure unknown ROIs but do not silently treat them as organs."""
+
+        from .imaging import mask_geometry
+
+        notes: list[QCUnclassifiedNote] = []
+        evidence: list[MetricEvidence] = []
+        for ref in structures:
+            volume_ml = None
+            mask = loaded.get(ref.artifact_id)
+            if mask is not None:
+                voxels, _, _ = mask_geometry(mask)
+                volume_ml = round(voxels * voxel_ml, 3)
+            notes.append(
+                QCUnclassifiedNote(
+                    structure=ref.label,
+                    canonical_roi=canonical_roi(ref.label),
+                    artifact_id=ref.artifact_id,
+                    volume_ml=volume_ml,
+                )
+            )
+            item = _evidence(
+                evidence_id=f"qc:{ref.artifact_id}:unclassified_volume",
+                structure=ref.label,
+                metric="volume",
+                value=volume_ml,
+                unit="mL",
+                source="uploaded unclassified contour",
+                artifact_ids=[ref.artifact_id, image_artifact_id],
+            )
+            if item:
+                evidence.append(item)
+        return notes, evidence
+
     def _completeness(self, case, site_query: str | None) -> QCCompleteness | None:
         """Set difference between the site's protocol structures and what is contoured.
 
@@ -830,7 +1168,16 @@ class ContourQCEngine:
         # Exact equality after conservative canonicalization. Never accept
         # "brainstem" for "brain", "sigmoid colon" for "colon", or "eye" for
         # "left eye".
-        organ_contours = [item for item in case.contours if not is_target(item.label)]
+        organ_contours = [
+            item
+            for item in case.contours
+            if roi_role(
+                item.label,
+                getattr(item, "metadata", {}) or {},
+                self.known_anatomy,
+            )
+            == "organ"
+        ]
         present_by_id: dict[str, str] = {}
         for item in organ_contours:
             present_by_id.setdefault(canonical_roi(item.label), item.label)
@@ -931,9 +1278,22 @@ def _report_candidates(case) -> list:
     return [item for _, item in selected]
 
 
+def _artifact_role(
+    ref,
+) -> Literal["organ", "target", "auxiliary", "unclassified"]:
+    return roi_role(
+        ref.label,
+        getattr(ref, "metadata", {}) or {},
+        DEFAULT_KNOWN_ANATOMY,
+    )
+
+
 def _artifact_is_target(ref) -> bool:
-    role = str(ref.metadata.get("target_type") or "").casefold()
-    return role in {"gtv", "ctv", "ptv", "itv", "target"} or is_target(ref.label)
+    return _artifact_role(ref) == "target"
+
+
+def _artifact_is_auxiliary(ref) -> bool:
+    return _artifact_role(ref) == "auxiliary"
 
 
 def assess_report_readiness(case, scope: str = "comprehensive") -> ReportReadiness:
@@ -947,23 +1307,29 @@ def assess_report_readiness(case, scope: str = "comprehensive") -> ReportReadine
         raise ValueError("report scope must be comprehensive, available, oar, or target")
     candidates = _report_candidates(case)
     organ_ids = {
-        canonical_roi(item.label) for item in candidates if not _artifact_is_target(item)
+        canonical_roi(item.label)
+        for item in candidates
+        if _artifact_role(item) == "organ"
     }
     target_ids = {
         canonical_roi(item.label) for item in candidates if _artifact_is_target(item)
     }
+    clinical_candidates = [
+        item for item in candidates if _artifact_role(item) in {"organ", "target"}
+    ]
     missing: list[str] = []
     if scope in {"comprehensive", "oar"} and not organ_ids:
         missing.append("organ_or_oar_contours")
     if scope in {"comprehensive", "target"} and not target_ids:
         missing.append("target_contours")
-    if scope == "available" and not candidates:
+    if scope == "available" and not clinical_candidates:
         missing.append("contours")
     ready = not missing
     if ready:
         reason = (
             f"{len(organ_ids)} organ/OAR and {len(target_ids)} target canonical "
-            "structures are available for the requested report scope."
+            "structures are available for the requested report scope. "
+            "Auxiliary structures are excluded."
         )
     else:
         reason = "Missing deterministic report inputs: " + ", ".join(missing) + "."
@@ -999,6 +1365,13 @@ class ReportEvidenceBuilder:
         candidates = _report_candidates(case)
 
         for ref in candidates:
+            role = _artifact_role(ref)
+            if role not in {"organ", "target"}:
+                warnings.append(
+                    f'Excluded {role} structure "{ref.label}" from the clinical '
+                    "structure report."
+                )
+                continue
             try:
                 mask = load_mask(self.store.artifact_path(ref), volume)
             except Exception as exc:
@@ -1006,7 +1379,6 @@ class ReportEvidenceBuilder:
                 continue
             loaded[ref.artifact_id] = mask
             voxels, _, centroid = mask_geometry(mask)
-            role = "target" if _artifact_is_target(ref) else "organ"
             source = str(
                 ref.metadata.get("source_model")
                 or ("uploaded contour" if ref.kind == "contour" else "generated mask")

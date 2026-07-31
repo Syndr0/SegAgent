@@ -121,6 +121,131 @@ class GroundingVerifierTests(unittest.TestCase):
 
 
 class EvidenceCriticQCTests(unittest.TestCase):
+    def test_legacy_qc_comparisons_are_migrated_into_typed_evidence(self) -> None:
+        comparisons = [
+            {
+                "structure": "Eye R",
+                "dice": 0.708,
+                "contour_volume_ml": 14.56,
+                "model_volume_ml": 7.972,
+                "volume_difference_pct": 82.6,
+                "mean_surface_mm": 2.76,
+                "hd95_mm": 4.77,
+            },
+            {
+                "structure": "Eye L",
+                "dice": 0.687,
+                "contour_volume_ml": 14.502,
+                "model_volume_ml": 7.593,
+                "volume_difference_pct": 91.0,
+            },
+            {
+                "structure": "GTVnd",
+                "dice": 0.0,
+                "contour_volume_ml": 46.007,
+                "model_volume_ml": 0.548,
+                "volume_difference_pct": 8296.2,
+            },
+            {
+                "structure": "GTVrn",
+                "dice": 0.011,
+                "contour_volume_ml": 4.552,
+                "model_volume_ml": 15.042,
+                "volume_difference_pct": -69.7,
+            },
+        ]
+        observation = ToolObservation(
+            observation_id="observation_000000000010",
+            tool="run_qc",
+            summary="Legacy QC result",
+            data={"qc_report": {"comparisons": comparisons}},
+        )
+        answer = (
+            "Eye R: Dice=0.708, contour=14.56 mL, model=7.972 mL, "
+            "volume difference=82.6%, mean surface=2.76 mm, HD95=4.77 mm.\n"
+            "Eye L: Dice=0.687, contour=14.502 mL, model=7.593 mL, "
+            "volume difference=91.0%.\nGTVnd: Dice=0.0, contour=46.007 mL, "
+            "model=0.548 mL, volume difference=8296.2%.\nGTVrn: Dice=0.011, "
+            "contour=4.552 mL, model=15.042 mL, volume difference=-69.7%."
+        )
+        self.assertEqual(EvidenceCritic().review(answer, [observation]), [])
+
+    def test_current_typed_qc_metric_wins_over_conflicting_legacy_value(self) -> None:
+        observation = ToolObservation(
+            observation_id="observation_000000000011",
+            tool="run_qc",
+            summary="QC",
+            data={
+                "qc_report": {
+                    "metric_evidence": [
+                        {
+                            "evidence_id": "typed:eye_r:contour_volume",
+                            "structure": "Eye R",
+                            "metric": "contour_volume",
+                            "value": 10.0,
+                            "unit": "mL",
+                            "source": "current typed evidence",
+                        }
+                    ],
+                    "comparisons": [
+                        {
+                            "structure": "Eye R",
+                            "contour_volume_ml": 14.56,
+                        }
+                    ],
+                }
+            },
+        )
+        critic = EvidenceCritic()
+        self.assertEqual(
+            critic.review("Eye R contour=10.0 mL.", [observation]),
+            [],
+        )
+        findings = critic.review("Eye R contour=14.56 mL.", [observation])
+        self.assertTrue(any(item.check == "numeric_grounding" for item in findings))
+
+    def test_summary_text_alone_does_not_admit_a_number(self) -> None:
+        observation = ToolObservation(
+            observation_id="observation_000000000012",
+            tool="run_qc",
+            summary="Visible summary says contour volume is 37 mL.",
+            data={"qc_report": {}},
+        )
+        findings = EvidenceCritic().review(
+            "The contour volume is 37 mL.",
+            [observation],
+        )
+        self.assertTrue(any(item.check == "numeric_grounding" for item in findings))
+
+    def test_safe_answer_uses_verified_fallback_instead_of_rejection(self) -> None:
+        observation = ToolObservation(
+            observation_id="observation_000000000013",
+            tool="inspect_mask",
+            summary="eye_L volume is 16.335 mL.",
+            data={
+                "segment_result": {
+                    "measurements": [
+                        {
+                            "structure": "eye_L",
+                            "volume_ml": 16.335,
+                        }
+                    ]
+                }
+            },
+        )
+        answer, findings, fallback_used = EvidenceCritic().safe_answer(
+            "eye_L is visible on axial slices 95 through 97.",
+            [observation],
+            observation.summary,
+            "Contour measurement completed.",
+        )
+        self.assertEqual(answer, observation.summary)
+        self.assertTrue(fallback_used)
+        self.assertTrue(any(item.severity == "error" for item in findings))
+        self.assertNotIn("I cannot return", answer)
+        self.assertNotIn("95", answer)
+        self.assertNotIn("97", answer)
+
     def test_world_centroid_is_admitted_with_mm_units(self) -> None:
         observation = ToolObservation(
             observation_id="observation_000000000002",

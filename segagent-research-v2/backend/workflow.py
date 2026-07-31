@@ -665,14 +665,15 @@ class SegAgentGraph:
                 )
         answer = response.text
         answer = (answer or "").strip() or "I could not describe this image."
-        findings = self.critic.review(answer, [])
-        blocking = [item for item in findings if item.severity == "error"]
-        if blocking:
-            answer = (
-                "I cannot give that description because it stated values that "
-                "were not measured.\n\n"
-                + "\n".join(f"- {item.message}" for item in blocking)
-            )
+        answer, findings, fallback_used = self.critic.safe_answer(
+            answer,
+            [],
+            (
+                "Image review completed. For quantitative results, request "
+                "segmentation or measurement of a named structure."
+            ),
+            "Image review completed.",
+        )
         events = []
         if response.thinking:
             events.append(
@@ -691,7 +692,19 @@ class SegAgentGraph:
                     label="Visual answer ready",
                 )
             )
-        events.extend([event("answer", text=answer), event("run_completed")])
+        events.extend(
+            [
+                event(
+                    "answer",
+                    text=answer,
+                    critic_findings=[
+                        item.model_dump(mode="json") for item in findings
+                    ],
+                    fallback_used=fallback_used,
+                ),
+                event("run_completed"),
+            ]
+        )
         return {
             "final_answer": answer,
             "gates_fired": [
@@ -711,7 +724,10 @@ class SegAgentGraph:
             event(
                 "phase_started",
                 phase="run_qc",
-                label="Comparing uploaded organ contours and describing targets",
+                label=(
+                    "Classifying contours, comparing eligible organs, and "
+                    "describing targets"
+                ),
             )
         )
         if self.qc_tool is None:
@@ -879,11 +895,33 @@ class SegAgentGraph:
             if item.summary and not item.data.get("skipped")
         ]
         if not useful:
-            return (
-                "I could not gather any new evidence for that. Could you rephrase "
-                "what you would like me to contour or measure?"
-            )
+            return "Analysis completed. No new structured tool result was produced."
         return "Here is what I have measured so far:\n\n" + "\n\n".join(useful)
+
+    @staticmethod
+    def _completion_status(observations: list[ToolObservation]) -> str:
+        """Number-free terminal answer used only if a tool summary also fails review."""
+
+        tools = {item.tool for item in observations}
+        if "run_qc" in tools:
+            return (
+                "Contour QC completed. The verified comparisons, ROI role "
+                "classifications, and generated artifacts are available above. "
+                "The comparison model is a second opinion, not ground truth."
+            )
+        if "segment" in tools:
+            return (
+                "Segmentation completed. The verified masks, measurements, and "
+                "artifacts are available above."
+            )
+        if "inspect_mask" in tools:
+            return (
+                "Contour measurement completed. The verified measurements and "
+                "referenced artifacts are available above."
+            )
+        if "lookup_protocol" in tools:
+            return "Protocol lookup completed. The retrieved result is available above."
+        return "Analysis completed. Verified tool results are available above."
 
     def _report_evidence(
         self, state: AgentState, observations: list[ToolObservation]
@@ -1502,15 +1540,13 @@ class SegAgentGraph:
         )
         answer = decision.final_answer or "No final answer was produced."
         observations = self._observations(state)
-        findings = self.critic.review(answer, observations)
-        blocking = [item for item in findings if item.severity == "error"]
-        if blocking:
-            answer = (
-                "I cannot return the proposed answer because its claims were not fully "
-                "grounded in the recorded tool evidence.\n\n"
-                + "\n".join(f"- {item.message}" for item in blocking)
-            )
-        elif findings:
+        answer, findings, fallback_used = self.critic.safe_answer(
+            answer,
+            observations,
+            self._summarize(observations),
+            self._completion_status(observations),
+        )
+        if findings and not any(item.severity == "error" for item in findings):
             answer += "\n\nEvidence limitations:\n" + "\n".join(
                 f"- {item.message}" for item in findings
             )
@@ -1522,8 +1558,16 @@ class SegAgentGraph:
                     "phase_completed",
                     phase="finalize",
                     label="Evidence-grounded answer ready",
+                    fallback_used=fallback_used,
                 ),
-                event("answer", text=answer, critic_findings=[item.model_dump(mode="json") for item in findings]),
+                event(
+                    "answer",
+                    text=answer,
+                    critic_findings=[
+                        item.model_dump(mode="json") for item in findings
+                    ],
+                    fallback_used=fallback_used,
+                ),
                 event("run_completed"),
             ],
         }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import uuid
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .knowledge import HybridKnowledgeBase
-from .qc import ContourQCEngine
+from .qc import ContourQCEngine, canonical_roi
 from .schemas import (
     EvidenceRecord,
     Finding,
@@ -435,6 +436,33 @@ class ContourQCTool:
                     f"world centroid {item.centroid_mm} mm, closest contoured "
                     f"structures by surface distance: {near}"
                 )
+        if report.auxiliaries:
+            lines.append(
+                "Non-organ auxiliary structures were identified and excluded from "
+                "anatomy-model comparison:"
+            )
+            for item in report.auxiliaries:
+                volume = (
+                    f"{item.volume_ml} mL"
+                    if item.volume_ml is not None
+                    else "volume unavailable"
+                )
+                lines.append(
+                    f"{item.structure} [auxiliary/{item.auxiliary_class}]: {volume}. "
+                    f"Classification source: {item.classification_source}."
+                )
+        if report.unclassified:
+            lines.append(
+                "Structures with no safe role mapping were measured but not sent to "
+                "the anatomy comparison model:"
+            )
+            for item in report.unclassified:
+                volume = (
+                    f"{item.volume_ml} mL"
+                    if item.volume_ml is not None
+                    else "volume unavailable"
+                )
+                lines.append(f"{item.structure} [unclassified]: {volume}. {item.note}")
         if report.completeness:
             completeness = report.completeness
             applicability = completeness.applicability
@@ -501,20 +529,50 @@ class EvidenceCritic:
                 )
         return findings
 
+    def safe_answer(
+        self,
+        candidate: str,
+        observations: list[ToolObservation],
+        deterministic_fallback: str,
+        completion_fallback: str,
+    ) -> tuple[str, list[Finding], bool]:
+        """Select a verified answer without exposing a critic rejection page."""
+
+        findings = self.review(candidate, observations)
+        if not any(item.severity == "error" for item in findings):
+            return candidate, findings, False
+        for fallback in (
+            deterministic_fallback,
+            completion_fallback,
+            "Analysis completed.",
+        ):
+            if fallback.strip() and not any(
+                item.severity == "error"
+                for item in self.review(fallback, observations)
+            ):
+                return fallback, findings, True
+        # The final literal contains no numeric or citation claims and is kept as
+        # a total-function guard if verifier rules expand in the future.
+        return "Analysis completed.", findings, True
+
     @staticmethod
     def _record(observation: ToolObservation) -> EvidenceRecord:
+        metrics = EvidenceCritic._metrics(observation)
         return EvidenceRecord(
             record_id=observation.observation_id,
             tool=observation.tool,
             summary=observation.summary,
-            values=EvidenceCritic._values(observation),
-            metrics=EvidenceCritic._metrics(observation),
+            values=EvidenceCritic._values(observation, metrics),
+            metrics=metrics,
             citations=EvidenceCritic._citations(observation),
             artifact_ids=list(observation.evidence_ids),
         )
 
     @staticmethod
-    def _values(observation: ToolObservation) -> dict[str, float]:
+    def _values(
+        observation: ToolObservation,
+        admitted_metrics: list[MetricEvidence] | None = None,
+    ) -> dict[str, float]:
         """Pull the numeric quantities a tool emitted from its structured data."""
         values: dict[str, float] = {}
         try:
@@ -553,26 +611,249 @@ class EvidenceCritic:
                     if isinstance(value, (int, float)) and metric:
                         values[f"report{index}_{metric}"] = float(value)
         except Exception:
-            return values
+            pass
+        for index, item in enumerate(
+            admitted_metrics
+            if admitted_metrics is not None
+            else EvidenceCritic._metrics(observation)
+        ):
+            values[f"metric{index}_{item.metric}"] = float(item.value)
         return values
 
     @staticmethod
-    def _metrics(observation: ToolObservation) -> list[MetricEvidence]:
+    def _finite_float(value) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+
+    @staticmethod
+    def _metric_key(item: MetricEvidence) -> tuple[str, str]:
+        return canonical_roi(item.structure or ""), item.metric.casefold()
+
+    @classmethod
+    def _legacy_qc_metrics(
+        cls,
+        observation: ToolObservation,
+        metrics: list[MetricEvidence],
+    ) -> list[MetricEvidence]:
+        """Read-time migration for QC observations saved before typed evidence.
+
+        Only explicit, whitelisted QC fields are admitted.  Natural-language
+        summaries and arbitrary JSON numbers remain outside the trust boundary.
+        Existing typed metrics always win over legacy values.
+        """
+
+        data = observation.data or {}
+        report = data.get("qc_report")
+        if not isinstance(report, dict):
+            return metrics
+        admitted = {cls._metric_key(item) for item in metrics}
+
+        def artifact_ids(*values) -> list[str]:
+            flattened: list[str] = list(observation.evidence_ids)
+            for value in values:
+                if isinstance(value, str) and value:
+                    flattened.append(value)
+                elif isinstance(value, dict):
+                    artifact_id = value.get("artifact_id")
+                    if artifact_id:
+                        flattened.append(str(artifact_id))
+                elif isinstance(value, list):
+                    for nested in value:
+                        if isinstance(nested, dict) and nested.get("artifact_id"):
+                            flattened.append(str(nested["artifact_id"]))
+                        elif isinstance(nested, str) and nested:
+                            flattened.append(nested)
+            return list(dict.fromkeys(flattened))
+
+        def add(
+            *,
+            evidence_id: str,
+            structure: str | None,
+            metric: str,
+            value,
+            unit: str,
+            source: str,
+            artifacts=(),
+        ) -> None:
+            parsed = cls._finite_float(value)
+            key = (canonical_roi(structure or ""), metric.casefold())
+            if parsed is None or key in admitted:
+                return
+            metrics.append(
+                MetricEvidence(
+                    evidence_id=evidence_id,
+                    structure=structure or None,
+                    canonical_roi=canonical_roi(structure or "") or None,
+                    metric=metric,
+                    value=parsed,
+                    unit=unit,
+                    source=source,
+                    artifact_ids=artifact_ids(*artifacts),
+                )
+            )
+            admitted.add(key)
+
+        comparison_fields = (
+            ("dice", "dice", "ratio"),
+            ("contour_volume_ml", "contour_volume", "mL"),
+            ("model_volume_ml", "model_volume", "mL"),
+            ("volume_difference_pct", "volume_difference", "%"),
+            ("mean_surface_mm", "mean_surface_distance", "mm"),
+            ("hd95_mm", "hd95", "mm"),
+        )
+        for index, item in enumerate(report.get("comparisons", []) or []):
+            if not isinstance(item, dict):
+                continue
+            structure = str(item.get("structure") or "")
+            artifacts = (
+                item.get("contour_artifact_id"),
+                item.get("model_mask"),
+                item.get("difference_overlays") or [],
+            )
+            for field, metric, unit in comparison_fields:
+                add(
+                    evidence_id=(
+                        f"{observation.observation_id}:legacy:comparison:"
+                        f"{index}:{metric}"
+                    ),
+                    structure=structure,
+                    metric=metric,
+                    value=item.get(field),
+                    unit=unit,
+                    source="legacy structured QC comparison",
+                    artifacts=artifacts,
+                )
+
+        for index, item in enumerate(report.get("targets", []) or []):
+            if not isinstance(item, dict):
+                continue
+            structure = str(item.get("structure") or "")
+            artifacts = (item.get("artifact_id"),)
+            add(
+                evidence_id=f"{observation.observation_id}:legacy:target:{index}:volume",
+                structure=structure,
+                metric="volume",
+                value=item.get("volume_ml"),
+                unit="mL",
+                source="legacy uploaded target contour",
+                artifacts=artifacts,
+            )
+            for axis, value in zip(("x", "y", "z"), item.get("centroid_mm") or []):
+                add(
+                    evidence_id=(
+                        f"{observation.observation_id}:legacy:target:"
+                        f"{index}:centroid_{axis}"
+                    ),
+                    structure=structure,
+                    metric=f"centroid_{axis}",
+                    value=value,
+                    unit="mm",
+                    source="legacy NIfTI world geometry",
+                    artifacts=artifacts,
+                )
+            for nearby, value in (item.get("near_surface_mm") or {}).items():
+                add(
+                    evidence_id=(
+                        f"{observation.observation_id}:legacy:target:{index}:"
+                        f"surface_distance:{canonical_roi(str(nearby))}"
+                    ),
+                    structure=structure,
+                    metric=f"surface_distance_to:{canonical_roi(str(nearby))}",
+                    value=value,
+                    unit="mm",
+                    source="legacy physical-space mask geometry",
+                    artifacts=artifacts,
+                )
+
+        for collection, source in (
+            ("auxiliaries", "legacy uploaded auxiliary contour"),
+            ("unclassified", "legacy uploaded unclassified contour"),
+        ):
+            for index, item in enumerate(report.get(collection, []) or []):
+                if not isinstance(item, dict):
+                    continue
+                structure = str(item.get("structure") or "")
+                add(
+                    evidence_id=(
+                        f"{observation.observation_id}:legacy:{collection}:"
+                        f"{index}:volume"
+                    ),
+                    structure=structure,
+                    metric="volume",
+                    value=item.get("volume_ml"),
+                    unit="mL",
+                    source=source,
+                    artifacts=(item.get("artifact_id"),),
+                )
+
+        for name, value in (report.get("summary") or {}).items():
+            if str(name) not in {
+                "ok",
+                "warn",
+                "error",
+                "target",
+                "auxiliary",
+                "unclassified",
+            }:
+                continue
+            add(
+                evidence_id=(
+                    f"{observation.observation_id}:legacy:summary:{name}_count"
+                ),
+                structure=None,
+                metric=f"{name}_structure_count",
+                value=value,
+                unit="count",
+                source="structured QC summary",
+            )
+
+        completeness = report.get("completeness")
+        if isinstance(completeness, dict):
+            for name in ("expected", "present", "missing"):
+                items = completeness.get(name)
+                if isinstance(items, list):
+                    add(
+                        evidence_id=(
+                            f"{observation.observation_id}:legacy:protocol:"
+                            f"{name}_structure_count"
+                        ),
+                        structure=None,
+                        metric=f"{name}_structure_count",
+                        value=len(items),
+                        unit="count",
+                        source=str(
+                            completeness.get("source") or "protocol registry"
+                        ),
+                    )
+        return metrics
+
+    @classmethod
+    def _metrics(cls, observation: ToolObservation) -> list[MetricEvidence]:
         """Preserve metric, unit, source, and artifacts for contextual checking."""
         metrics: list[MetricEvidence] = []
-        try:
-            data = observation.data or {}
-            qc_report = data.get("qc_report")
-            if isinstance(qc_report, dict):
-                for item in qc_report.get("metric_evidence", []) or []:
-                    if isinstance(item, dict):
-                        metrics.append(MetricEvidence.model_validate(item))
-            report_evidence = data.get("report_evidence")
-            if isinstance(report_evidence, dict):
-                for item in report_evidence.get("metric_evidence", []) or []:
-                    if isinstance(item, dict):
-                        metrics.append(MetricEvidence.model_validate(item))
+        data = observation.data or {}
+        qc_report = data.get("qc_report")
+        if isinstance(qc_report, dict):
+            for item in qc_report.get("metric_evidence", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    metrics.append(MetricEvidence.model_validate(item))
+                except (TypeError, ValueError):
+                    continue
+        report_evidence = data.get("report_evidence")
+        if isinstance(report_evidence, dict):
+            for item in report_evidence.get("metric_evidence", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    metrics.append(MetricEvidence.model_validate(item))
+                except (TypeError, ValueError):
+                    continue
 
+        try:
             segment = data.get("segment_result")
             if isinstance(segment, dict):
                 model_name = str(segment.get("model_name") or observation.tool)
@@ -642,9 +923,9 @@ class EvidenceCritic:
                                     artifact_ids=list(dict.fromkeys(artifact_ids)),
                                 )
                             )
-        except Exception:
-            return metrics
-        return metrics
+        except (TypeError, ValueError):
+            pass
+        return cls._legacy_qc_metrics(observation, metrics)
 
     @staticmethod
     def _citations(observation: ToolObservation) -> list[str]:

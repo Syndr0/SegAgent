@@ -331,6 +331,34 @@ class QCTargetNote(BaseModel):
     near_surface_mm: dict[str, float] = Field(default_factory=dict)
 
 
+class QCAuxiliaryNote(BaseModel):
+    """A non-anatomical or derived ROI excluded from organ-model comparison."""
+
+    structure: str
+    canonical_roi: str
+    auxiliary_class: str
+    classification_source: str
+    artifact_id: str | None = None
+    volume_ml: float | None = None
+    note: str = (
+        "Identified as an auxiliary planning structure and excluded from "
+        "anatomy-model comparison."
+    )
+
+
+class QCUnclassifiedNote(BaseModel):
+    """An ROI whose role cannot be established safely from metadata or name."""
+
+    structure: str
+    canonical_roi: str
+    artifact_id: str | None = None
+    volume_ml: float | None = None
+    note: str = (
+        "Role is unclassified; excluded from anatomy-model comparison until "
+        "an explicit organ, target, or auxiliary mapping is supplied."
+    )
+
+
 class ProtocolApplicability(BaseModel):
     """Whether a protocol list can be applied to this case and on what basis."""
 
@@ -359,6 +387,8 @@ class QCReport(BaseModel):
     case_id: str
     comparisons: list[QCComparison] = Field(default_factory=list)
     targets: list[QCTargetNote] = Field(default_factory=list)
+    auxiliaries: list[QCAuxiliaryNote] = Field(default_factory=list)
+    unclassified: list[QCUnclassifiedNote] = Field(default_factory=list)
     completeness: QCCompleteness | None = None
     summary: dict[str, int] = Field(default_factory=dict)
     metric_evidence: list[MetricEvidence] = Field(default_factory=list)
