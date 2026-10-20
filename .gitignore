@@ -1,20 +1,63 @@
-# Upstream projects (clone separately — see segagent/README.md)
+# External checkouts (see the repository README)
 VoxTell/
 voxtell-web-plugin/
 
-# Python
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python environments and generated files
+.venv/
+venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
 
 # Node / frontend build
 node_modules/
 dist/
+*.tsbuildinfo
 
 # OS / editor
 .DS_Store
 .claude/
 
-# Models / large weights
+# Local cases, checkpoints, and database journals
+.research_data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Downloaded model weights and medical-image data
 models/
+weights/
+checkpoints/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
 *.nii
 *.nii.gz
+*.dcm
+*.nrrd
+*.mha
+*.mhd

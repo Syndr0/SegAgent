@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose an improvement to the research workflow or repository.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before proposing a change. Use synthetic examples
+        and keep patient information, credentials, and private data out of this issue.
+  - type: dropdown
+    id: implementation
+    attributes:
+      label: Target implementation
+      options:
+        - Research v2 (segagent-research-v2)
+        - Legacy (segagent)
+        - Repository documentation or shared files
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or research need
+      description: Describe the user need, limitation, or research question motivating the change.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired behavior and a concrete example.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include existing workarounds and tradeoffs, if any.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation approach
+      description: Suggest observable acceptance criteria or an evaluation method. Avoid unsupported clinical claims.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include relevant source links, dependency implications, or related issues.

@@ -1,125 +1,169 @@
+<div align="center">
+
 # SegAgent
 
-A reasoning-segmentation agent that composes two **pretrained** models.
-**Qwen2.5-VL-7B** is the planner: it reasons step by step and calls **VoxTell** (a 3D
-medical-image segmentation expert) as a tool, reading back quantitative evidence until it
-can answer. The web layer adds a streaming **chain-of-thought chat panel** over the VoxTell
-viewer.
+**Language-guided 3D segmentation. Typed tools. Reviewable evidence.**
 
-> **Core technique — a ReAct loop.** All the
-> capability comes from **loop engineering**: the planner runs a **ReAct** protocol —
-> **Reason → Act → Observe** — interleaving chain-of-thought with `segment()` tool calls
-> and feeding each result back before it acts again.
-<img src="image-1.png" alt="SegAgent architecture" width="600">
+A research framework connecting a local multimodal planner to VoxTell for medical-image segmentation and contour quality control.
 
-<img src="image.png" alt="SegAgent architecture" width="600">
+[![License: MIT](https://img.shields.io/badge/License-MIT-2563eb.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-334155.svg)](segagent-research-v2/pyproject.toml)
+[![Status: Research](https://img.shields.io/badge/Status-Research-0f766e.svg)](#research-status)
 
-- **Segmentation Expert Model** = **VoxTell** (unchanged — we reuse the plugin's loaded `predictor`).
-- **Large Language Model** = **Qwen2.5-VL-7B-Instruct**, used **zero-shot** as a ReAct
-  tool-caller. Both models are pretrained and frozen.
-- The web UI gains a **chat panel** that streams the **chain of thought**, tool calls,
-  observations, and the final answer; masks the agent produces are overlaid in the
-  existing NiiVue viewer.
+[简体中文](README.zh-CN.md) · [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Configuration](docs/configuration.md) · [Contributing](CONTRIBUTING.md)
 
-## What's in here
+</div>
 
-| File                                             | Goes to (in `voxtell-web-plugin/`)      | Notes                                                                 |
-| ------------------------------------------------ | --------------------------------------- | --------------------------------------------------------------------- |
-| `segagent/backend/agent.py`                      | `backend/agent.py`                      | **new** — the agent loop (Qwen2.5-VL ↔ VoxTell)                       |
-| `segagent/backend/server.py`                     | `backend/server.py`                     | **drop-in replacement** — adds `/chat` (NDJSON stream) + `/mask/{id}` |
-| `segagent/frontend/src/components/ChatPanel.tsx` | `frontend/src/components/ChatPanel.tsx` | **new** — streaming chat + CoT UI                                     |
-| `segagent/frontend/src/App.tsx`                  | `frontend/src/App.tsx`                  | **drop-in replacement** — mounts the chat panel, overlays agent masks |
-| `segagent/requirements-segagent.txt`             | —                                       | extra Python deps to `pip install`                                    |
+![SegAgent Research v2 architecture: case input, typed planning, VoxTell tools, evidence, review, and persistent artifacts](docs/assets/architecture.svg)
 
-`server.py` and `App.tsx` are the plugin's originals with only SegAgent additions,
-so you can diff them against your checkout before copying.
+SegAgent separates planning from segmentation. **Qwen2.5-VL-7B-Instruct** interprets representative image slices and selects a structured action; **VoxTell** segments the full 3D volume. Measurements, overlays, tool observations, and review decisions are recorded alongside the case so a run can be inspected and resumed.
 
-## Install (on the server — nothing is built on your laptop)
+The repository contains two implementations. **Start with [`segagent-research-v2/`](segagent-research-v2/)** for the standalone application. [`segagent/`](segagent/) preserves the original extension for an external VoxTell web plugin.
 
-Assumes you already followed the [voxtell-web-plugin README](https://github.com/gomesgustavoo/voxtell-web-plugin)
-(conda env `voxtell`, PyTorch, `pip install -e .`, `python download_model.py`).
+> **Research software.** SegAgent has not been clinically validated and is not a medical device. Generated masks and QC findings require expert interpretation. The included protocol registry is research seed data, not an approved clinical guideline set.
+
+## Contents
+
+- [Capabilities](#capabilities)
+- [Choose an implementation](#choose-an-implementation)
+- [Quick start](#quick-start)
+- [Workflow](#workflow)
+- [Repository map](#repository-map)
+- [Evaluation](#evaluation)
+- [Research status](#research-status)
+- [Contributing and security](#contributing-and-security)
+- [Acknowledgments and citation](#acknowledgments-and-citation)
+- [License](#license)
+
+## Capabilities
+
+| Capability | Research v2 implementation |
+| --- | --- |
+| Structured planning | Pydantic-validated `lookup_protocol`, `segment`, `run_qc`, `ask_user`, and `final` decisions. |
+| Volumetric segmentation | Text prompts sent to VoxTell; NIfTI mask and PNG overlay artifacts, with recorded volume, bounding-box, and centroid measurements. |
+| Protocol retrieval | Local OAR protocol registry plus lexical/embedding retrieval over user-supplied Markdown and text documents. |
+| Contour QC | Geometry checks, empty-mask and topology checks, reference-volume checks, laterality checks, and Dice agreement with an expert-model mask. |
+| Human review | Graph segmentation pauses for approval, rejection, or feedback, then resumes from its checkpoint. |
+| Inspectable runs | React/NiiVue viewer, typed NDJSON workflow events, file-backed case/run records, and SQLite graph checkpoints. |
+| Tool integration | Three MCP tools and an experimental A2A JSON-RPC adapter. |
+
+The planner and segmentation expert use pretrained weights; this repository does not include training or fine-tuning pipelines. The web stream reports workflow events rather than token-by-token model reasoning. See [architecture and implementation boundaries](docs/architecture.md).
+
+## Choose an implementation
+
+| | Research v2 | Original plugin extension |
+| --- | --- | --- |
+| Directory | [`segagent-research-v2/`](segagent-research-v2/) | [`segagent/`](segagent/) |
+| Application | Standalone FastAPI backend and React/NiiVue frontend | Files copied into an external `voxtell-web-plugin` checkout |
+| Planner | Typed JSON decisions | Free-form ReAct action parsing |
+| State | Case artifacts, run records, checkpoint/resume | Prototype-specific state |
+| Review | Checkpointed segmentation review | Earlier prototype behavior |
+| Documentation | [Getting started](docs/getting-started.md) | [Legacy integration](docs/legacy.md) |
+
+Both implementations depend on externally installed VoxTell code and model weights. Their configuration names and API routes differ; do not mix installation instructions between them.
+
+## Quick start
+
+Research v2 requires **Python 3.11+**, a compatible PyTorch environment, **Node.js 22.12+** for the frontend, and VoxTell weights. GPU memory requirements depend on image size and the combined model workload; this repository does not publish a validated minimum. Follow the [complete setup guide](docs/getting-started.md) to install the dependencies and download weights.
+
+From a prepared environment:
 
 ```bash
-# 1. clone the base web plugin AND this repo on the server
-git clone https://github.com/gomesgustavoo/voxtell-web-plugin.git
 git clone https://github.com/Syndr0/SegAgent.git
-cd voxtell-web-plugin
-conda activate voxtell            # the env you created for the plugin
-
-# 2. copy the SegAgent files over the base repo
-cp ../SegAgent/segagent/backend/agent.py                      backend/agent.py
-cp ../SegAgent/segagent/backend/server.py                     backend/server.py
-cp ../SegAgent/segagent/frontend/src/components/ChatPanel.tsx frontend/src/components/ChatPanel.tsx
-cp ../SegAgent/segagent/frontend/src/App.tsx                  frontend/src/App.tsx
-
-# 3. extra python deps (Qwen2.5-VL etc.)
-pip install -r ../SegAgent/segagent/requirements-segagent.txt
-
-# 4. run (backend :8000, frontend :5173) — same as the base plugin
-./run.sh
+cd SegAgent/segagent-research-v2
+cp .env.example .env
 ```
 
-The frontend needs **no new npm packages** — `lucide-react` (already a dependency)
-provides every icon used.
+Set the model path and enable the multimodal planner in `.env`:
 
-> First `/chat` call downloads Qwen2.5-VL-7B (~16 GB) from Hugging Face and loads it;
-> the model is loaded **lazily**, so the server still starts fast and plain
-> `/predict` segmentation keeps working even before the LLM is ready.
-
-## Hardware
-
-Running all three models at once (Qwen2.5-VL-7B + VoxTell + Qwen3-Embedding-4B):
-
-- **Recommended: a single 24–48 GB GPU** (RTX 4090 / A5000 / A100). Peak ≈ 24 GB.
-- The base plugin's low-VRAM tricks (fp16 text encoder, CPU sliding-window offload)
-  still apply.
-
-### Fit on a smaller GPU (optional 4-bit)
-
-`pip install bitsandbytes`, then in `agent.py::_ensure_llm` swap the load for:
-
-```python
-from transformers import BitsAndBytesConfig
-self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    QWEN_MODEL_ID,
-    quantization_config=BitsAndBytesConfig(load_in_4bit=True,
-                                           bnb_4bit_compute_dtype=torch.bfloat16),
-    device_map="auto",
-).eval()
+```dotenv
+SEGAGENT_PLANNER=qwen
+SEGAGENT_LLM_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+SEGAGENT_VOXTELL_MODEL=/absolute/path/to/voxtell_v1.1
+SEGAGENT_REQUIRE_MASK_APPROVAL=true
 ```
 
-That brings Qwen2.5-VL to ~6 GB.
+Start the backend from `segagent-research-v2/`:
 
-## Configuration (env vars, all optional)
+```bash
+uvicorn backend.api:app --host 127.0.0.1 --port 8000 --workers 1
+```
 
-| Var                       | Default                       | Meaning                                                |
-| ------------------------- | ----------------------------- | ------------------------------------------------------ |
-| `SEGAGENT_LLM`            | `Qwen/Qwen2.5-VL-7B-Instruct` | planner model id                                       |
-| `SEGAGENT_MAX_STEPS`      | `6`                           | max reason→segment iterations before forcing an answer |
-| `SEGAGENT_MONTAGE_SLICES` | `6`                           | how many axial slices Qwen sees for grounding          |
-| `SEGAGENT_MAX_NEW_TOKENS` | `512`                         | generation budget per step                             |
+In a second terminal, from the repository root:
 
-## How it works — the ReAct loop
+```bash
+cd segagent-research-v2/frontend
+npm install
+npm run dev -- --host 127.0.0.1 --strictPort
+```
 
-1. `/chat` receives the volume + a question, extracts `N` windowed axial slices, and
-   hands them to Qwen2.5-VL with a **ReAct** system prompt.
-2. Each turn Qwen replies `THOUGHT: … / ACTION: segment("…")` **or** `THOUGHT: … / FINAL: …`.
-3. On an `ACTION`, the backend runs VoxTell on the **full 3D volume**, computes
-   statistics (voxel count, mL, mean intensity, bbox), saves the mask, and feeds the
-   stats back as an `OBSERVATION`.
-4. Events stream to the browser as NDJSON; `ChatPanel` renders the chain of thought
-   live and overlays each mask via `/mask/{id}`.
-5. When Qwen emits `FINAL` (or hits `SEGAGENT_MAX_STEPS`), the answer is shown.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173), upload a NIfTI scan, and submit a request. Models load on first use. The checked-in `.env.example` starts with the **rule baseline**; switching to `qwen` enables the local multimodal planner. Rule mode still needs VoxTell for segmentation and expert QC.
 
-## Design notes
+For separate frontend/backend hosts, set `VITE_API_BASE_URL` and matching backend CORS origins. Configuration, persistent paths, and optional integrations are documented in [Configuration](docs/configuration.md).
 
-- **Pretrained and frozen.** Qwen is a planner/interpreter; VoxTell does the
-  segmentation. The LLM never needs a `<SEG>` token — the two models
-  are decoupled through a **text tool-call interface**, which is exactly why no extra
-  training is required.
-- **3D vision into a 2D LLM.** Qwen2.5-VL is 2D, so it "sees" the volume through a few
-  representative slices. VoxTell — not Qwen — is what actually understands the 3D data,
-  so slice grounding only needs to be good enough for the _planning_ decisions.
-- **Determinism.** Generation is greedy (`do_sample=False`) for reproducible traces.
-- Prompts should use anatomy VoxTell knows (organs, substructures, some lesions). The
-  system prompt already steers the model toward these.
+## Workflow
+
+1. **Register a case.** Upload a `.nii` / `.nii.gz` scan and optional masks on the same grid.
+2. **Plan an action.** Qwen receives representative 2D slices, tool observations, and a JSON schema; the workflow validates its decision.
+3. **Collect evidence.** Retrieve a protocol, run full-volume segmentation, or compare uploaded contours with deterministic checks and a model reference.
+4. **Review segmentation.** The graph pauses after producing masks. Inspect overlays and approve, reject, or supply feedback to resume the run.
+5. **Inspect the result.** Read the final response together with its measurements, observations, artifacts, and event trace.
+
+The review interrupt covers graph-generated segmentation. MCP direct tool calls and QC references do not use that same gate, and artifact downloads are not approval-gated. Case artifacts persist across runs; a new question starts a new run rather than a conversation with persistent chat memory.
+
+## Repository map
+
+```text
+SegAgent/
+├── README.md / README.zh-CN.md   Project overview
+├── LICENSE                     MIT license
+├── CONTRIBUTING.md             Contribution workflow
+├── SECURITY.md                 Security and data-handling guidance
+├── docs/
+│   ├── getting-started.md      Research v2 setup and first workflow
+│   ├── architecture.md         Components, interfaces, and boundaries
+│   ├── configuration.md        Environment-variable reference
+│   ├── legacy.md               Original plugin integration
+│   └── assets/                 Architecture figure and editable source
+├── segagent-research-v2/
+│   ├── backend/                Planner, tools, graph, storage, and APIs
+│   ├── frontend/               React/NiiVue research console
+│   ├── knowledge/              Seed protocols and guideline directory
+│   ├── evals/                  Rule-planner fixtures and evaluation runner
+│   └── tests/                  Deterministic unit tests
+└── segagent/                   Original web-plugin extension
+```
+
+## Evaluation
+
+From an environment with the research dependencies installed:
+
+```bash
+cd segagent-research-v2
+pytest -q
+python evals/run_evals.py --dataset evals/golden_cases.jsonl
+```
+
+The unit tests cover schemas, rule planning, retrieval, and storage. The starter evaluation uses text-only rule-planner fixtures. Neither establishes real-model segmentation accuracy, clinical quality, hardware capacity, or Qwen performance. No measured benchmark results are published here. See the [experiment protocol](segagent-research-v2/EXPERIMENTS.md) for proposed comparisons and reporting requirements.
+
+## Research status
+
+The current application is intended for local research with de-identified NIfTI data. It does not provide authentication, automatic de-identification, or a production deployment stack. Its heuristic evidence critic and expert-model agreement are aids to inspection, not correctness guarantees. Surface-distance metrics are not enabled in the default QC service.
+
+DICOM conversion and RTSTRUCT-related code belongs to the original plugin integration; the Research v2 upload API accepts NIfTI. See [Security](SECURITY.md) and [Architecture](docs/architecture.md) for the current boundaries.
+
+## Contributing and security
+
+Bug reports, documentation improvements, and reproducible research contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), use the [issue templates](https://github.com/Syndr0/SegAgent/issues/new/choose), and include the implementation, configuration, and commit you used. Keep medical images, identifying data, credentials, and model weights out of issues and pull requests.
+
+For a suspected vulnerability, follow [SECURITY.md](SECURITY.md) rather than publishing sensitive details in a public issue.
+
+## Acknowledgments and citation
+
+SegAgent builds on [VoxTell](https://github.com/MIC-DKFZ/VoxTell), [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct), [LangGraph](https://github.com/langchain-ai/langgraph), and [NiiVue](https://github.com/niivue/niivue). The original extension integrates with [voxtell-web-plugin](https://github.com/gomesgustavoo/voxtell-web-plugin).
+
+When reporting work that uses SegAgent, identify this repository and the exact commit, model checkpoints, configuration, and data split. Cite the upstream models and tools according to their own citation guidance. There is no SegAgent paper or DOI declared in this repository.
+
+## License
+
+Repository contributions are licensed under the [MIT License](LICENSE). External dependencies, pretrained weights, and upstream-derived components remain subject to their respective licenses; the MIT license does not grant additional rights to those materials.
