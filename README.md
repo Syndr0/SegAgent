@@ -6,7 +6,6 @@
 
 A research framework connecting Qwen3.5 to VoxTell for medical-image segmentation, mask-aware dialogue, and contour quality control.
 
-[![Status: Research](https://img.shields.io/badge/Status-Research-7c3aed?style=flat-square)](#project-status)
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb?style=flat-square)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](segagent/pyproject.toml)
 [![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178c6?style=flat-square&logo=typescript&logoColor=white)](segagent/frontend/package.json)
