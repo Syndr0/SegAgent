@@ -6,8 +6,17 @@
 
 A research framework connecting Qwen3.5 to VoxTell for medical-image segmentation, mask-aware dialogue, and contour quality control.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-2563eb.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-334155.svg)](segagent/pyproject.toml)
+[![Status: Research](https://img.shields.io/badge/Status-Research-7c3aed?style=flat-square)](#project-status)
+[![License: MIT](https://img.shields.io/badge/License-MIT-2563eb?style=flat-square)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](segagent/pyproject.toml)
+[![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178c6?style=flat-square&logo=typescript&logoColor=white)](segagent/frontend/package.json)
+
+[![Planner: Qwen3.5-9B](https://img.shields.io/badge/Planner-Qwen3.5--9B-6366f1?style=flat-square)](docs/architecture.md#models-and-image-inputs)
+[![Segmentation: VoxTell](https://img.shields.io/badge/Segmentation-VoxTell-0891b2?style=flat-square)](docs/architecture.md#models-and-image-inputs)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1c3c3c?style=flat-square&logo=langgraph&logoColor=white)](docs/architecture.md#conversation-and-execution)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](segagent/backend/api.py)
+[![React 19](https://img.shields.io/badge/React-19-149eca?style=flat-square&logo=react&logoColor=white)](segagent/frontend/package.json)
+[![NiiVue](https://img.shields.io/badge/NiiVue-3D_viewer-475569?style=flat-square)](docs/architecture.md#components)
 
 [简体中文](README.zh-CN.md) · [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Configuration](docs/configuration.md) · [Contributing](CONTRIBUTING.md)
 
