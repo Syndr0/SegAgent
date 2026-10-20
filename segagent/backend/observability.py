@@ -11,7 +11,7 @@ class Tracing:
     an explicit, separate decision to record sensitive payloads.
     """
 
-    def __init__(self, service_name: str = "segagent-research-v2"):
+    def __init__(self, service_name: str = "segagent"):
         self.tracer = None
         try:
             from opentelemetry import trace

@@ -20,8 +20,8 @@ class RunRequest(MessageArtifactContext):
 
 
 app = FastAPI(
-    title="SegAgent Research v2",
-    version="0.2.0-research",
+    title="SegAgent",
+    version="0.2.0",
     description="Stateful research API for typed 3D segmentation-agent experiments.",
 )
 settings = get_services().settings

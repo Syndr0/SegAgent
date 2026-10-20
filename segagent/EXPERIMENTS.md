@@ -1,10 +1,8 @@
 # Evaluation and research protocol
 
-This document describes evaluation support in **SegAgent Research v3**, the
-current implementation on `main`. Its source remains in
-`segagent-research-v2/` for historical path compatibility. This document reports
-no benchmark results; proposed experiments are identified separately from the
-runners and runtime measurements already implemented.
+This document describes evaluation support in **SegAgent**, implemented in
+`segagent/`. It reports no benchmark results; proposed experiments are identified
+separately from the runners and runtime measurements already implemented.
 
 ## Implemented evaluation runners
 
@@ -20,7 +18,7 @@ lookup uses alias matching and lexical BM25 fallback without semantic
 embeddings. It evaluates a first decision and, after a protocol-lookup action,
 feeds the lookup result back for a second decision.
 
-With the project dependencies installed, run from `segagent-research-v2/`:
+With the project dependencies installed, run from `segagent/`:
 
 ```bash
 python evals/run_evals.py --dataset evals/golden_cases.jsonl
@@ -128,7 +126,7 @@ claim that they have been executed or that any configuration has passed.
 
 ## Runtime evidence and QC measurements
 
-The v3 runtime already produces structured evidence, but neither runner above
+The runtime already produces structured evidence, but neither runner above
 constitutes a benchmark of that evidence pipeline:
 
 - `MetricEvidence` carries the measured quantity, unit, structure, source, and
@@ -181,7 +179,7 @@ The following are research questions, not reported findings:
 | Deterministic QC without expert comparison | No dedicated no-expert runtime switch. | Isolate the comparison component and use independent issue annotations. |
 | Interrupted versus uninterrupted execution | Checkpointed dialogue and clarification gates. | Add interruption schedules, restart scenarios, state assertions, and event auditing. |
 
-The current v3 configuration has no `SEGAGENT_REQUIRE_MASK_APPROVAL` setting.
+The current configuration has no `SEGAGENT_REQUIRE_MASK_APPROVAL` setting.
 Its clarification gates should not be described as the earlier blanket mask
 approval step. Any future human-review study must define its intervention and
 implementation before evaluation.

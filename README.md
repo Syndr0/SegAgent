@@ -7,20 +7,19 @@
 A research framework connecting Qwen3.5 to VoxTell for medical-image segmentation, mask-aware dialogue, and contour quality control.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-334155.svg)](segagent-research-v2/pyproject.toml)
-[![Research v3](https://img.shields.io/badge/Implementation-Research_v3-0f766e.svg)](#project-status)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-334155.svg)](segagent/pyproject.toml)
 
 [简体中文](README.zh-CN.md) · [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Configuration](docs/configuration.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
-![SegAgent Research v3: persistent case conversation, Qwen3.5 planning, VoxTell segmentation, and role-aware QC](docs/assets/architecture.svg)
+![SegAgent: persistent case conversation, Qwen3.5 planning, VoxTell segmentation, and role-aware QC](docs/assets/architecture.svg)
 
 SegAgent separates planning from segmentation. **Qwen3.5-9B** interprets image slices, follows the case conversation, and selects structured actions; **VoxTell** segments the full 3D volume. Masks, overlays, measurements, conversation history, and run evidence remain associated with the case for follow-up questions and reports.
 
 ## Project status
 
-**Research v3 is the final, canonical implementation**, merged from `segagent-research-v3` into `main`. The application remains in **[`segagent-research-v2/`](segagent-research-v2/)** under its historical directory name. That name does not designate a second supported version. The earlier `segagent/` source is retained only as a historical archive.
+The application is in **[`segagent/`](segagent/)**. The earlier plugin-based prototype is preserved under [`archive/prototype/`](archive/prototype/) for source history.
 
 > **Research software.** SegAgent has not been clinically validated and is not a medical device. Model thinking and expert-model agreement are not clinical evidence. The included protocol registry is research seed data, not an approved clinical guideline set.
 
@@ -38,7 +37,7 @@ SegAgent separates planning from segmentation. **Qwen3.5-9B** interprets image s
 
 ## Capabilities
 
-| Capability | Research v3 implementation |
+| Capability | Implementation |
 | --- | --- |
 | Persistent conversation | Case-bound message history, resumable clarification questions, and validated references to previously generated masks. |
 | Structured planning | Typed intent/dialogue state and validated actions for protocol lookup, segmentation, inspection, QC, visual questions, clarification, and final responses. |
@@ -59,7 +58,7 @@ From a prepared environment:
 
 ```bash
 git clone https://github.com/Syndr0/SegAgent.git
-cd SegAgent/segagent-research-v2
+cd SegAgent/segagent
 cp .env.example .env
 ```
 
@@ -81,14 +80,14 @@ uvicorn backend.api:app --host 127.0.0.1 --port 8000 --workers 1
 In a second terminal, from the repository root:
 
 ```bash
-cd segagent-research-v2/frontend
+cd segagent/frontend
 npm install
 npm run dev -- --host 127.0.0.1 --strictPort
 ```
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173), upload a NIfTI scan, and send a message. Models load on first use. Use one API worker and avoid `--reload` for GPU inference.
 
-The [configuration reference](docs/configuration.md) covers independent Qwen/VoxTell placement, input budgets, batching, persistent paths, and `VITE_API_BASE_URL`. The [four-RTX-3090 profile](segagent-research-v2/.env.4x3090.example) is a placement example, not a minimum requirement. The optional `rule` planner is a development baseline within the same application; segmentation still requires VoxTell.
+The [configuration reference](docs/configuration.md) covers independent Qwen/VoxTell placement, input budgets, batching, persistent paths, and `VITE_API_BASE_URL`. The [four-RTX-3090 profile](segagent/.env.4x3090.example) is a placement example, not a minimum requirement. The optional `rule` planner is a development baseline within the same application; segmentation still requires VoxTell.
 
 ## Conversation workflow
 
@@ -115,13 +114,14 @@ SegAgent/
 │   ├── architecture.md         Workflow, models, tools, and interfaces
 │   ├── configuration.md        Environment-variable reference
 │   └── assets/                 Architecture figure and editable source
-├── segagent-research-v2/        Canonical Research v3 app; historical path
+├── segagent/                   SegAgent application
 │   ├── backend/                Dialogue, planner, tools, QC, evidence, and APIs
 │   ├── frontend/               Conversation UI and NiiVue viewer
 │   ├── knowledge/              Seed protocols and guideline directory
 │   ├── evals/                  Rule fixtures and model-matrix runner
 │   └── tests/                  Deterministic unit and contract tests
-└── segagent/                   Historical prototype source
+└── archive/
+    └── prototype/              Historical prototype source
 ```
 
 ## Evaluation
@@ -129,7 +129,7 @@ SegAgent/
 From an environment with the research dependencies installed:
 
 ```bash
-cd segagent-research-v2
+cd segagent
 pytest -q
 python evals/run_evals.py --dataset evals/golden_cases.jsonl
 
@@ -139,7 +139,7 @@ python evals/run_model_matrix.py --case-id case_... --thinking both
 
 The rule-fixture runner checks text-based planning and retrieval. The model-matrix runner compares Qwen3.5-9B and 27B with thinking enabled/disabled through the actual multimodal planner; it is not an end-to-end segmentation or clinical benchmark. Unit tests cover conversation, dialogue gates, prompt normalization, evidence, QC, storage, and runtime guards without real model weights.
 
-No benchmark results are claimed here. See the [evaluation protocol](segagent-research-v2/EXPERIMENTS.md) for implemented metrics, comparison limits, and proposed studies.
+No benchmark results are claimed here. See the [evaluation protocol](segagent/EXPERIMENTS.md) for implemented metrics, comparison limits, and proposed studies.
 
 ## Research boundaries
 

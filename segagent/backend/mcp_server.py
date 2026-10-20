@@ -20,7 +20,7 @@ except ImportError as exc:  # pragma: no cover - dependency message for optional
     raise SystemExit("Install the research requirements to run the MCP server") from exc
 
 
-mcp = FastMCP("SegAgent Research v2")
+mcp = FastMCP("SegAgent")
 
 
 @mcp.tool()

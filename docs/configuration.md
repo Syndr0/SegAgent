@@ -1,16 +1,15 @@
 # Configuration
 
-This page describes SegAgent Research v3. The source directory remains
-`segagent-research-v2/` for path compatibility.
+This page describes the SegAgent application in `segagent/`.
 
 ## Backend settings
 
 `backend/config.py` defines Pydantic settings with the `SEGAGENT_` prefix.
 Environment variables override a `.env` file read from the backend process's
-**current working directory**. Start from `segagent-research-v2/` when using its
+**current working directory**. Start from `segagent/` when using its
 example configuration. Settings are cached per process; restart after changes.
 
-In the table, `<project>` means the absolute `segagent-research-v2/` directory,
+In the table, `<project>` means the absolute `segagent/` directory,
 derived from the location of `backend/config.py`.
 
 | Environment variable | Default | Purpose and limits |

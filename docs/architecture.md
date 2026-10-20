@@ -1,11 +1,10 @@
 # Architecture
 
-SegAgent Research v3 combines a local multimodal planner, text-prompted 3D
+SegAgent combines a local multimodal planner, text-prompted 3D
 segmentation, persistent case conversations, and evidence-based contour analysis.
-The application remains in `segagent-research-v2/` for path compatibility; that
-directory name does not identify a separate product choice.
+The application source is in `segagent/`.
 
-![SegAgent Research v3 architecture](assets/architecture.svg)
+![SegAgent architecture](assets/architecture.svg)
 
 ## Components
 
@@ -181,5 +180,4 @@ content-capture switch. See [configuration](configuration.md).
 
 Deterministic and fake-backend tests do not establish real-model segmentation
 accuracy, clinical performance, hardware capacity, or interoperability
-conformance. Legacy directory and metadata labels may retain historical version
-strings; the documented application is SegAgent Research v3.
+conformance.

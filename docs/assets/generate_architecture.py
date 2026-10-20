@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the Research v3 architecture illustration.
+"""Regenerate the SegAgent architecture illustration.
 
 The SVG uses only Python's standard library and remains fully editable.
     python docs/assets/generate_architecture.py
@@ -81,7 +81,7 @@ def render() -> str:
     PARTS.clear()
     add(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
         f'viewBox="0 0 {W} {H}" role="img" aria-labelledby="title description">')
-    add('<title id="title">SegAgent Research v3 architecture</title>')
+    add('<title id="title">SegAgent architecture</title>')
     add('<desc id="description">A React workspace sends messages and referenced mask '
         'IDs to FastAPI. One conversation per case provides history and checkpointed '
         'LangGraph state. Typed intent and a dialogue state machine constrain the '
@@ -108,7 +108,7 @@ def render() -> str:
     # Heading and a compact, code-native slice mark.
     icon("layers", 64, 63, scale=1.25)
     text(122, 93, "SegAgent", 42, INK, 700)
-    pill(338, 64, 186, "RESEARCH V3", color=PURPLE, fill="#F0EDFA", size=19)
+    pill(338, 64, 258, "RESEARCH SOFTWARE", color=PURPLE, fill="#F0EDFA", size=19)
     text(64, 130, "Evidence-first orchestration for 3D medical images", 25, MUTED)
     text(1736, 91, "SYSTEM ARCHITECTURE", 19, MUTED, 600, anchor="end",
          extra='letter-spacing="1.6"')
@@ -283,7 +283,7 @@ def render() -> str:
     text(780, 1619, "Resource access", 18, MUTED)
     arrow("M1027 1612H1068", PURPLE, dash=True, marker="purple")
     text(1083, 1619, "Auxiliary integration", 18, MUTED)
-    text(1736, 1619, "SegAgent Research v3", 19, MUTED, anchor="end")
+    text(1736, 1619, "SegAgent", 19, MUTED, anchor="end")
     add('</g></svg>')
     return "\n".join(PARTS) + "\n"
 

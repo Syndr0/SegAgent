@@ -1,7 +1,6 @@
 # Security policy
 
-SegAgent Research v3 is the current research application on `main`. Its source
-directory, `segagent-research-v2/`, retains a historical name. The application
+SegAgent is a research application implemented in `segagent/`. It
 does not provide an authentication or authorization layer and is intended for
 local, controlled research use. Bind services to loopback by default. Public hosting
 requires a separate security assessment and appropriate access controls; CORS
@@ -25,7 +24,7 @@ issue while arranging private contact.
 
 Provide the affected commit, component, expected impact, and minimal
 reproduction steps using synthetic data. If you are reporting a finding in the
-historical `segagent/` archive, identify that path explicitly; it is not an
+historical `archive/prototype/` source, identify that path explicitly; it is not an
 alternative supported application. Redact secrets, local identifiers, and
 patient information from attachments and logs.
 

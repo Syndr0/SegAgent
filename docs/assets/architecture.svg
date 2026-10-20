@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1664" viewBox="0 0 1800 1664" role="img" aria-labelledby="title description">
-<title id="title">SegAgent Research v3 architecture</title>
+<title id="title">SegAgent architecture</title>
 <desc id="description">A React workspace sends messages and referenced mask IDs to FastAPI. One conversation per case provides history and checkpointed LangGraph state. Typed intent and a dialogue state machine constrain the Qwen3.5-9B planner. Actions include protocol lookup, prompt-normalized VoxTell segmentation in bounded batches, existing-mask inspection, role-aware contour quality control, clarification that resumes the same turn, and visual question answering. Tool evidence returns to planning; a metric-aware grounding verifier and evidence critic guard final answers. Seed protocols, optional guideline text, independent VoxTell inference, file-backed artifacts, JSONL messages and events, and SQLite graph checkpoints support the workflow. Live NDJSON includes thinking_delta and workflow events; a complete answer event delivers the final response. MCP exposes tools; A2A is an auxiliary research adapter. These research checks are not clinical validation.</desc>
 <defs>
 <marker id="teal" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0L8 4.5L0 9Z" fill="#087F8C"/></marker>
@@ -11,8 +11,8 @@
 <rect x="30" y="30" width="1740" height="1604" rx="24" fill="white" stroke="#E2E8F0" stroke-width="1.5" />
 <g transform="translate(64 63) scale(1.25)" fill="none" stroke="#087F8C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="m0 8 16-8 16 8-16 8Z"/><path d="m0 17 16 8 16-8M0 26l16 8 16-8"/></g>
 <text x="122" y="93" font-size="42" font-weight="700" fill="#172B46" text-anchor="start" >SegAgent</text>
-<rect x="338" y="64" width="186" height="30" rx="15" fill="#F0EDFA" stroke="none" stroke-width="1.5" />
-<text x="431.0" y="85" font-size="19" font-weight="600" fill="#6855B3" text-anchor="middle" >RESEARCH V3</text>
+<rect x="338" y="64" width="258" height="30" rx="15" fill="#F0EDFA" stroke="none" stroke-width="1.5" />
+<text x="467.0" y="85" font-size="19" font-weight="600" fill="#6855B3" text-anchor="middle" >RESEARCH SOFTWARE</text>
 <text x="64" y="130" font-size="25" font-weight="400" fill="#52657C" text-anchor="start" >Evidence-first orchestration for 3D medical images</text>
 <text x="1736" y="91" font-size="19" font-weight="600" fill="#52657C" text-anchor="end" letter-spacing="1.6">SYSTEM ARCHITECTURE</text>
 <rect x="64" y="170" width="300" height="150" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
@@ -161,5 +161,5 @@
 <text x="780" y="1619" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Resource access</text>
 <path d="M1027 1612H1068" fill="none" stroke="#6855B3" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#purple)"/>
 <text x="1083" y="1619" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Auxiliary integration</text>
-<text x="1736" y="1619" font-size="19" font-weight="400" fill="#52657C" text-anchor="end" >SegAgent Research v3</text>
+<text x="1736" y="1619" font-size="19" font-weight="400" fill="#52657C" text-anchor="end" >SegAgent</text>
 </g></svg>

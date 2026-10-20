@@ -1,7 +1,7 @@
 {
-  "name": "segagent-research-v2-frontend",
+  "name": "segagent-frontend",
   "private": true,
-  "version": "0.2.0-research",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

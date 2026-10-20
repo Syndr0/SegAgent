@@ -2,10 +2,9 @@
 
 `architecture.svg` is the editable, code-generated system diagram used by the
 repository README. `architecture.png` is its 2× raster export (3600 × 3328).
-The illustration describes **SegAgent Research v3**. The implementation retains
-the historical `segagent-research-v2/` directory for compatibility; that path is
-not a second supported architecture. The diagram shows the system and model
-adapters, without inventing the internal network architecture of either model.
+The illustration describes **SegAgent**, the application in `segagent/`.
+The diagram shows the system and model adapters, without inventing the internal
+network architecture of either model.
 
 ## Regenerate
 
@@ -29,10 +28,15 @@ line crossings, and legibility.
 
 ## Architecture sources
 
-The diagram follows the research implementation in `backend/workflow.py`,
-`intent.py`, `dialogue.py`, `prompts.py`, `planner.py`, `tools.py`, `verifier.py`,
-`qc.py`, `expert.py`, `batching.py`, `knowledge.py`, `storage.py`, `api.py`,
-`mcp_server.py`, and `a2a.py`, plus the frontend's NDJSON stream handling.
+The diagram follows the implementation in `segagent/backend/workflow.py`,
+`segagent/backend/intent.py`, `segagent/backend/dialogue.py`,
+`segagent/backend/prompts.py`, `segagent/backend/planner.py`,
+`segagent/backend/tools.py`, `segagent/backend/verifier.py`,
+`segagent/backend/qc.py`, `segagent/backend/expert.py`,
+`segagent/backend/batching.py`, `segagent/backend/knowledge.py`,
+`segagent/backend/storage.py`, `segagent/backend/api.py`,
+`segagent/backend/mcp_server.py`, and `segagent/backend/a2a.py`, plus the
+frontend's NDJSON stream handling in `segagent/frontend/`.
 Solid arrows show actions or returned evidence. Dashed arrows show resource
 access and auxiliary integrations. Each case has one continuing conversation;
 clarification replies resume the suspended turn. Segmentation has no universal

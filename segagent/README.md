@@ -1,14 +1,31 @@
-# Historical SegAgent prototype
+# SegAgent
 
-This directory archives the earlier plugin-based SegAgent prototype. It is
-retained for source history and research context, not as an alternative
-installation or a supported deployment target.
+This directory contains the SegAgent application: the backend, frontend, knowledge
+sources, evaluation runners, and tests.
 
-**SegAgent Research v3 on `main` is the current application.** Its implementation
-lives in [`segagent-research-v2/`](../segagent-research-v2/); the directory name
-is historical.
+![SegAgent architecture](../docs/assets/architecture.svg)
 
-See the [project overview](../README.md),
-[current setup guide](../docs/getting-started.md), and
-[archive note](../docs/legacy.md). Archived APIs and environment variables should
-not be applied to the current application.
+Start with the [project overview](../README.md) or [简体中文介绍](../README.zh-CN.md).
+
+| Document | Purpose |
+| --- | --- |
+| [Getting started](../docs/getting-started.md) | Dependencies, weights, backend, frontend, and first conversation |
+| [Architecture](../docs/architecture.md) | Persistent dialogue, Qwen3.5, VoxTell, QC, evidence, and integrations |
+| [Configuration](../docs/configuration.md) | Device placement, input limits, batching, and storage |
+| [Experiments](EXPERIMENTS.md) | Existing runners and proposed studies |
+| [Contributing](../CONTRIBUTING.md) | Development workflow |
+| [Security](../SECURITY.md) | Sensitive-data handling and research boundaries |
+
+## Source layout
+
+```text
+backend/      Intent, dialogue, planner, tools, QC, evidence, storage, and API
+frontend/     Case conversation, live model output, and NiiVue viewer
+knowledge/    Research seed protocols and optional guideline documents
+evals/        Rule fixtures and Qwen3.5 model-matrix evaluation
+tests/        Deterministic unit and contract tests
+```
+
+Run backend and evaluation commands from this directory. Frontend commands run from `frontend/`. VoxTell code and model weights are external dependencies.
+
+The default planner is `Qwen/Qwen3.5-9B` with thinking enabled. Masks appear without a blocking approval gate; clarification questions continue through the case conversation. Model thinking and mask comparisons do not replace clinical evidence or expert review.

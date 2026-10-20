@@ -5,8 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Propose improvements to the current SegAgent Research v3 application on
-        main. Its source directory retains the historical name segagent-research-v2.
+        Propose improvements to SegAgent. Application code is in segagent/.
         Search existing issues first. Use synthetic examples and keep patient
         information, credentials, and private data out of this issue.
   - type: dropdown

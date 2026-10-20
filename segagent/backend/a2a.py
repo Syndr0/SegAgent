@@ -35,9 +35,9 @@ def rpc_error(request_id: str | int | None, code: int, message: str) -> dict:
 def agent_card() -> dict:
     settings = get_services().settings
     return {
-        "name": "SegAgent Research v2",
+        "name": "SegAgent",
         "description": "Evidence-first 3D medical segmentation research agent.",
-        "version": "0.2.0-research",
+        "version": "0.2.0",
         "url": f"{settings.api_base_url}/a2a",
         "capabilities": {"streaming": False, "pushNotifications": False},
         "defaultInputModes": ["text/plain", "application/json"],

@@ -7,25 +7,25 @@
 连接 Qwen3.5 与 VoxTell，用于医学影像分割、掩膜感知对话和轮廓质量控制的研究框架。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb.svg)](LICENSE)
-[![Research v3](https://img.shields.io/badge/Implementation-Research_v3-0f766e.svg)](#项目状态)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-334155.svg)](segagent/pyproject.toml)
 
 [English](README.md) · [安装指南](docs/getting-started.md) · [架构说明](docs/architecture.md) · [配置参考](docs/configuration.md) · [贡献指南](CONTRIBUTING.md)
 
 </div>
 
-![SegAgent Research v3：持久化病例对话、Qwen3.5 规划、VoxTell 分割及按 ROI 角色分类的 QC](docs/assets/architecture.svg)
+![SegAgent：持久化病例对话、Qwen3.5 规划、VoxTell 分割及按 ROI 角色分类的 QC](docs/assets/architecture.svg)
 
 SegAgent 将规划与分割分开：**Qwen3.5-9B** 根据图像切片、病例对话和已有证据选择结构化动作；**VoxTell** 对完整三维影像进行分割。掩膜、叠加图、测量值、对话及运行证据与病例一起保存，支持继续提问和生成报告。
 
 ## 项目状态
 
-**Research v3 是本项目最终、唯一的正式实现**，由 `segagent-research-v3` 分支合并到 `main`。应用仍位于 **[`segagent-research-v2/`](segagent-research-v2/)**，目录名因路径兼容而保留，并不表示另一个可选版本。早期的 `segagent/` 只作为历史源码存档。
+应用位于 **[`segagent/`](segagent/)**，后端、前端、知识库和评估工具均在此目录。早期插件原型仅作为历史源码保存在 [`archive/prototype/`](archive/prototype/)。
 
 > **研究软件。** 本项目未经临床验证，不是医疗器械。模型思考及模型间一致性不能作为临床证据；随附协议库是研究种子数据，不是获批指南。
 
 ## 主要能力
 
-| 能力 | Research v3 实现 |
+| 能力 | 实现 |
 | --- | --- |
 | 持久化多轮对话 | 同一病例保留消息历史，继续回答澄清问题，并引用已有病例内掩膜。 |
 | 类型化规划 | 意图识别、确定性对话状态，以及协议查询、分割、检查、QC、视觉问答和最终回答等动作。 |
@@ -44,7 +44,7 @@ SegAgent 将规划与分割分开：**Qwen3.5-9B** 根据图像切片、病例�
 
 ```bash
 git clone https://github.com/Syndr0/SegAgent.git
-cd SegAgent/segagent-research-v2
+cd SegAgent/segagent
 cp .env.example .env
 ```
 
@@ -66,14 +66,14 @@ uvicorn backend.api:app --host 127.0.0.1 --port 8000 --workers 1
 另一个终端从仓库根目录启动前端：
 
 ```bash
-cd segagent-research-v2/frontend
+cd segagent/frontend
 npm install
 npm run dev -- --host 127.0.0.1 --strictPort
 ```
 
 打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)，上传 NIfTI 并发送消息。模型首次使用时加载；GPU 推理只启一个 API worker，不使用 `--reload`。
 
-[配置参考](docs/configuration.md) 包括独立设备放置、图像预算、分块、存储和前端地址。[四张 3090 配置](segagent-research-v2/.env.4x3090.example) 是一种布局示例，不是最低要求。`rule` 是同一应用中的开发基线，不是另一个产品版本。
+[配置参考](docs/configuration.md) 包括独立设备放置、图像预算、分块、存储和前端地址。[四张 3090 配置](segagent/.env.4x3090.example) 是一种布局示例，不是最低要求。`rule` 是用于开发和评估的规则规划基线；分割仍需 VoxTell。
 
 ## 对话工作流
 
@@ -91,25 +91,25 @@ QC 将模型结果视为参考。GTV、CTV、PTV 等临床靶区被测量和空�
 
 | 路径 | 内容 |
 | --- | --- |
-| [`segagent-research-v2/`](segagent-research-v2/) | 最终 Research v3 应用，保留历史目录名 |
+| [`segagent/`](segagent/) | SegAgent 应用：后端、前端、知识库、评估与测试 |
 | [Architecture](docs/architecture.md) | 对话、模型、工具、QC、证据与接口 |
 | [Configuration](docs/configuration.md) | 环境变量、默认值、设备与持久化路径 |
 | [Getting started](docs/getting-started.md) | 依赖、权重和首次对话 |
-| [Experiments](segagent-research-v2/EXPERIMENTS.md) | 已实现评估与后续实验 |
+| [Experiments](segagent/EXPERIMENTS.md) | 已实现评估与后续实验 |
 | [Contributing](CONTRIBUTING.md) | 开发与提交约定 |
 | [Security](SECURITY.md) | 数据处理与漏洞报告 |
-| `segagent/` | 历史原型存档 |
+| [`archive/prototype/`](archive/prototype/) | 历史插件原型，仅作源码存档 |
 
 ## 评估与研究边界
 
 ```bash
-cd segagent-research-v2
+cd segagent
 pytest -q
 python evals/run_evals.py --dataset evals/golden_cases.jsonl
 python evals/run_model_matrix.py --case-id case_... --thinking both
 ```
 
-文本样例检查规则规划和检索；模型矩阵比较 Qwen3.5-9B/27B 的 thinking 开关，直接调用真实多模态规划器，不等同于端到端分割或临床评估。单元测试覆盖对话、门控、提示词、证据、QC、存储及运行时保护，不加载真实权重。指标与局限见 [评估说明](segagent-research-v2/EXPERIMENTS.md)，本文不宣称实测基准结果。
+文本样例检查规则规划和检索；模型矩阵比较 Qwen3.5-9B/27B 的 thinking 开关，直接调用真实多模态规划器，不等同于端到端分割或临床评估。单元测试覆盖对话、门控、提示词、证据、QC、存储及运行时保护，不加载真实权重。指标与局限见 [评估说明](segagent/EXPERIMENTS.md)，本文不宣称实测基准结果。
 
 应用面向本地、去标识 NIfTI 研究，没有身份验证、自动去标识或生产部署栈。证据检查和 ROI 角色判定不能保证事实或临床正确性。研究应用之外的使用仍需临床专家复核。历史原型中的 DICOM/RTSTRUCT 集成不是当前上传接口。
 

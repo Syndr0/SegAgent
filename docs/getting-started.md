@@ -1,8 +1,9 @@
-# Getting started with SegAgent Research v3
+# Getting started with SegAgent
 
 [Project overview](../README.md) · [Configuration](configuration.md) · [Architecture](architecture.md)
 
-Research v3 is the canonical application on `main`. It lives in `segagent-research-v2/` under a historical directory name; use that path below. The archived prototype is not an alternative installation target.
+The SegAgent application lives in `segagent/`. Follow the steps below to install
+its dependencies, configure the models, and start a local research session.
 
 ## Requirements
 
@@ -18,7 +19,7 @@ The CUDA planner uses BF16. Placement and input budgets can be configured indepe
 
 ```bash
 git clone https://github.com/Syndr0/SegAgent.git
-cd SegAgent/segagent-research-v2
+cd SegAgent/segagent
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -100,7 +101,7 @@ API documentation is at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 In another terminal, from the repository root:
 
 ```bash
-cd segagent-research-v2/frontend
+cd segagent/frontend
 npm install
 npm run dev -- --host 127.0.0.1 --strictPort
 ```

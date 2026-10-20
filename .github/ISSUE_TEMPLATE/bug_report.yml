@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Report current SegAgent Research v3 behavior on main. Its source directory
-        retains the historical name segagent-research-v2. Search existing issues
-        first. Do not attach patient images, PHI, credentials, or identifying logs.
+        Report SegAgent behavior and include the affected commit. Application code
+        is in segagent/. Search existing issues first. Do not attach patient
+        images, PHI, credentials, or identifying logs.
         Report security vulnerabilities privately as described
         in [SECURITY.md](https://github.com/Syndr0/SegAgent/blob/main/SECURITY.md).
   - type: dropdown

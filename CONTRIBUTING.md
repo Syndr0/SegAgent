@@ -1,14 +1,13 @@
-# Contributing to SegAgent Research v3
+# Contributing to SegAgent
 
-SegAgent Research v3 is the current application on `main`, for agentic 3D
+SegAgent is an application for agentic 3D
 medical-image segmentation, case-bound dialogue, and contour quality control.
 Contributions to code, documentation, evaluation, and reproducible research
 workflows are welcome.
 
-The application source remains in `segagent-research-v2/` for historical path
-compatibility. This directory name does not identify a separate product or an
-alternative installation. The earlier `segagent/` prototype is a historical
-archive; new development targets the current application.
+The application source is in `segagent/`. The earlier plugin-based prototype
+is preserved under `archive/prototype/` for source history; new development
+targets the application.
 
 ## Discuss the change
 
@@ -26,7 +25,7 @@ against the code on `main`, rather than inferring it from archived modules.
 Use Python 3.11 or newer. From the repository root:
 
 ```bash
-cd segagent-research-v2
+cd segagent
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -39,7 +38,7 @@ remain applicable. Review the repository README before working on model-backed
 features.
 
 For frontend work, use a Node.js version compatible with the declared Vite
-dependency, then install dependencies in `segagent-research-v2/frontend`:
+dependency, then install dependencies in `segagent/frontend`:
 
 ```bash
 npm install
@@ -54,13 +53,13 @@ links, commands, and architecture descriptions against the source instead.
 The test suite covers deterministic behavior including planner contracts,
 dialogue, intent gates, prompt provenance, schemas, storage, retrieval, QC,
 verification, and workflow control without downloading model weights. With
-development dependencies installed, run from `segagent-research-v2/`:
+development dependencies installed, run from `segagent/`:
 
 ```bash
 python -m pytest -q
 ```
 
-For changes to the React console, run from `segagent-research-v2/frontend/`:
+For changes to the React console, run from `segagent/frontend/`:
 
 ```bash
 npm run lint
