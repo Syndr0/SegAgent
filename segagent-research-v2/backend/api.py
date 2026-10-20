@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, Iterator
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from .a2a import router as a2a_router
-from .schemas import ApprovalDecision
+from .imaging import load_mask, load_volume
+from .schemas import MessageArtifactContext, RunEvent
 from .service import get_services
+from .workflow import ConversationConflictError
 
 
-class RunRequest(BaseModel):
+class RunRequest(MessageArtifactContext):
     question: str = Field(min_length=1, max_length=4000)
 
 
@@ -34,9 +36,38 @@ app.add_middleware(
 app.include_router(a2a_router)
 
 
-def ndjson(items):
-    for item in items:
-        yield item.model_dump_json() + "\n"
+class _NDJSONStream(Iterator[str]):
+    """Serialize events while forwarding close even before first iteration."""
+
+    def __init__(self, items: Iterator[RunEvent]):
+        self._items = iter(items)
+        self._closed = False
+
+    def __iter__(self) -> "_NDJSONStream":
+        return self
+
+    def __next__(self) -> str:
+        if self._closed:
+            raise StopIteration
+        return next(self._items).model_dump_json() + "\n"
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._items, "close", None)
+        if close is not None:
+            close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
+def ndjson(items: Iterator[RunEvent]) -> Iterator[str]:
+    return _NDJSONStream(items)
 
 
 @app.get("/api/health")
@@ -46,6 +77,16 @@ def health() -> dict:
         "status": "ok",
         "planner": services.settings.planner,
         "voxtellConfigured": services.settings.voxtell_model is not None,
+        "llmDevice": services.settings.resolved_llm_device,
+        "llmInputDevice": services.settings.llm_input_device,
+        "llmDeviceMap": services.settings.llm_device_map,
+        "llmMaxMemory": services.settings.llm_max_memory,
+        "voxtellDevice": services.settings.resolved_voxtell_device,
+        "llmMaxConcurrentGenerations": (
+            services.settings.llm_max_concurrent_generations
+        ),
+        "llmMaxPromptImages": services.settings.llm_max_prompt_images,
+        "voxtellBatchSize": services.settings.voxtell_batch_size,
         "researchOnly": True,
     }
 
@@ -149,25 +190,124 @@ def get_artifact(case_id: str, artifact_id: str):
         raise HTTPException(status_code=404, detail="Artifact not found") from exc
 
 
-@app.post("/api/cases/{case_id}/runs")
-def start_run(case_id: str, request: RunRequest):
+@app.post("/api/cases/{case_id}/edited-mask")
+def upload_edited_mask(
+    case_id: str,
+    structure: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
+    derived_from: Annotated[str | None, Form()] = None,
+    target_type: Annotated[str, Form()] = "unknown",
+):
+    """Register a user's edited contour after validating it against the case grid.
+
+    On-demand editing is decoupled from the run: the corrected contour is stored
+    as a new mask on the same image grid as the case (NiiVue exports on the
+    background volume, so this holds by construction); a grid mismatch is
+    rejected rather than silently corrupting the data.
+    """
+    name = file.filename or "edited.nii.gz"
+    if not name.lower().endswith((".nii", ".nii.gz")):
+        raise HTTPException(status_code=400, detail="Edited mask must be NIfTI (.nii/.nii.gz).")
+    services = get_services()
+    store = services.store
     try:
-        run_id, stream = get_services().workflow.start(case_id, request.question)
+        case = store.get_case(case_id)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail="Case not found") from exc
+    artifact_version = 1
+    if derived_from:
+        try:
+            parent, _ = store.get_artifact(case_id, derived_from)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="derived_from must identify a mask in this case",
+            ) from exc
+        if parent.kind not in {"mask", "contour"}:
+            raise HTTPException(
+                status_code=400,
+                detail="derived_from must identify a mask or contour",
+            )
+        try:
+            artifact_version = int(parent.metadata.get("artifact_version") or 1) + 1
+        except (TypeError, ValueError):
+            artifact_version = 2
+    reference = load_volume(store.artifact_path(case.image))
+    suffix = ".nii.gz" if name.lower().endswith(".nii.gz") else ".nii"
+    artifact_id, path = store.allocate_artifact_path(case_id, suffix)
+    with path.open("wb") as handle:
+        while chunk := file.file.read(1024 * 1024):
+            handle.write(chunk)
+    try:
+        load_mask(path, reference)
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400, detail=f"Edited mask does not match the case grid: {exc}"
+        ) from exc
+    label = " ".join(str(structure).strip().split()) or "edited contour"
+    return store.register_artifact(
+        case_id,
+        artifact_id,
+        path,
+        "mask",
+        label,
+        "application/gzip" if suffix == ".nii.gz" else "application/octet-stream",
+        {
+            "source_model": "human_edit",
+            "source_version": "1",
+            "derived_from": derived_from,
+            "artifact_version": artifact_version,
+            "target_type": target_type,
+        },
+    )
+
+
+@app.post("/api/cases/{case_id}/messages")
+def send_message(case_id: str, request: RunRequest):
+    """Send one conversational turn.
+
+    If the agent is waiting on a question for this case, the text is treated as
+    the reply and continues that turn; otherwise a new turn starts.
+    """
+    try:
+        run_id, stream = get_services().workflow.send(
+            case_id,
+            request.question,
+            MessageArtifactContext(
+                referenced_artifact_ids=request.referenced_artifact_ids,
+                visible_mask_ids=request.visible_mask_ids,
+                selected_mask_id=request.selected_mask_id,
+            ),
+        )
+    except ConversationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     response = StreamingResponse(ndjson(stream), media_type="application/x-ndjson")
     response.headers["X-Run-Id"] = run_id
-    response.headers["Cache-Control"] = "no-store"
+    # Keep token-sized NDJSON chunks moving through common reverse proxies.
+    # Without these headers a proxy may buffer the whole response and make a
+    # genuinely incremental model stream look like a completed-response replay.
+    response.headers["Cache-Control"] = "no-cache, no-store, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
     return response
 
 
-@app.post("/api/runs/{run_id}/resume")
-def resume_run(run_id: str, decision: ApprovalDecision):
+@app.get("/api/cases/{case_id}/conversation")
+def get_conversation(case_id: str):
     try:
-        stream = get_services().workflow.resume(run_id, decision)
+        services = get_services()
+        conversation = services.store.conversation_for_case(case_id)
+        return {
+            "conversation": conversation.model_dump(mode="json"),
+            "messages": [
+                item.model_dump(mode="json")
+                for item in services.store.messages(conversation.conversation_id)
+            ],
+        }
     except (ValueError, FileNotFoundError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return StreamingResponse(ndjson(stream), media_type="application/x-ndjson")
+        raise HTTPException(status_code=404, detail="Case not found") from exc
 
 
 @app.get("/api/runs/{run_id}")

@@ -7,6 +7,7 @@ from typing import Protocol
 
 import numpy as np
 
+from .batching import predict_structure_chunks
 from .imaging import VolumeData, load_volume
 
 
@@ -26,9 +27,15 @@ class VoxTellBackend:
 
     name = "VoxTell"
 
-    def __init__(self, model_dir: Path | None, device: str = "auto"):
+    def __init__(
+        self,
+        model_dir: Path | None,
+        device: str = "auto",
+        batch_size: int = 4,
+    ):
         self.model_dir = Path(model_dir) if model_dir else None
         self.device_name = device
+        self.batch_size = max(1, int(batch_size))
         self.version = self.model_dir.name if self.model_dir else "unconfigured"
         self._predictor = None
         self._lock = threading.RLock()
@@ -54,10 +61,26 @@ class VoxTellBackend:
             return predictor
 
     def segment(self, image_path: Path, structures: list[str]) -> tuple[VolumeData, np.ndarray]:
+        # VoxTell was trained on images read by nnU-Net's NibabelIOWithReorient,
+        # which reorients to RAS AND transposes the spatial axes to (z, y, x).
+        # Reading with a plain as_closest_canonical (x, y, z) feeds the model
+        # axis-transposed data and produces poor masks, so use the same reader
+        # and transpose the result back to the (x, y, z) frame the rest of the
+        # pipeline (geometry, overlays, save_mask, QC) works in.
+        from nnunetv2.imageio.nibabel_reader_writer import NibabelIOWithReorient
+
         volume = load_volume(image_path)
+        predictor = self._ensure()
         with self._lock:
-            masks = self._ensure().predict_single_image(volume.data[None], structures)
-        array = np.asarray(masks, dtype=np.uint8)
+            image, _ = NibabelIOWithReorient().read_images([str(image_path)])
+            array = predict_structure_chunks(
+                predictor.predict_single_image,
+                image,
+                structures,
+                self.batch_size,
+            )
+        if array.ndim == 4:
+            array = array.transpose(0, 3, 2, 1)  # (N, z, y, x) -> (N, x, y, z)
         if array.shape != (len(structures), *volume.data.shape):
             raise RuntimeError(f"unexpected VoxTell output shape: {array.shape}")
         return volume, array

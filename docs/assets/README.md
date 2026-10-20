@@ -1,9 +1,11 @@
 # Documentation artwork
 
 `architecture.svg` is the editable, code-generated system diagram used by the
-repository README. `architecture.png` is its 2× raster export (3600 × 2864).
-The illustration describes `segagent-research-v2/`; it does not describe the
-legacy application or invent the internal network architecture of either model.
+repository README. `architecture.png` is its 2× raster export (3600 × 3328).
+The illustration describes **SegAgent Research v3**. The implementation retains
+the historical `segagent-research-v2/` directory for compatibility; that path is
+not a second supported architecture. The diagram shows the system and model
+adapters, without inventing the internal network architecture of either model.
 
 ## Regenerate
 
@@ -28,8 +30,12 @@ line crossings, and legibility.
 ## Architecture sources
 
 The diagram follows the research implementation in `backend/workflow.py`,
-`planner.py`, `tools.py`, `expert.py`, `knowledge.py`, `storage.py`, `api.py`,
+`intent.py`, `dialogue.py`, `prompts.py`, `planner.py`, `tools.py`, `verifier.py`,
+`qc.py`, `expert.py`, `batching.py`, `knowledge.py`, `storage.py`, `api.py`,
 `mcp_server.py`, and `a2a.py`, plus the frontend's NDJSON stream handling.
 Solid arrows show actions or returned evidence. Dashed arrows show resource
-access and auxiliary integrations. The mask-review gate belongs to the
-segmentation path; QC treats expert masks as references rather than ground truth.
+access and auxiliary integrations. Each case has one continuing conversation;
+clarification replies resume the suspended turn. Segmentation has no universal
+mask-approval gate. QC uses ROI roles and typed evidence, while expert masks
+remain comparison references rather than ground truth. These software checks do
+not constitute clinical validation.

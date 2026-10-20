@@ -2,55 +2,45 @@
 
 # SegAgent
 
-**语言引导的三维分割 · 类型化工具 · 可审查的证据**
+**对话式三维分割 · 类型化工具 · 有证据支撑的后续分析**
 
-将本地多模态规划器与 VoxTell 连接，用于医学影像分割和轮廓质量控制的研究框架。
+连接 Qwen3.5 与 VoxTell，用于医学影像分割、掩膜感知对话和轮廓质量控制的研究框架。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-334155.svg)](segagent-research-v2/pyproject.toml)
-[![Status: Research](https://img.shields.io/badge/Status-Research-0f766e.svg)](#研究边界)
+[![Research v3](https://img.shields.io/badge/Implementation-Research_v3-0f766e.svg)](#项目状态)
 
 [English](README.md) · [安装指南](docs/getting-started.md) · [架构说明](docs/architecture.md) · [配置参考](docs/configuration.md) · [贡献指南](CONTRIBUTING.md)
 
 </div>
 
-![SegAgent Research v2 架构：病例输入、类型化规划、VoxTell 工具、证据、人工审查与持久化产物](docs/assets/architecture.svg)
+![SegAgent Research v3：持久化病例对话、Qwen3.5 规划、VoxTell 分割及按 ROI 角色分类的 QC](docs/assets/architecture.svg)
 
-SegAgent 将规划与分割分开：**Qwen2.5-VL-7B-Instruct** 根据代表性二维切片和工具返回的观察选择结构化动作；**VoxTell** 对完整三维影像进行分割。系统记录测量值、叠加图、工具观察及审查决定，支持检查单次运行并从检查点恢复。
+SegAgent 将规划与分割分开：**Qwen3.5-9B** 根据图像切片、病例对话和已有证据选择结构化动作；**VoxTell** 对完整三维影像进行分割。掩膜、叠加图、测量值、对话及运行证据与病例一起保存，支持继续提问和生成报告。
 
-仓库保留两套实现。新使用者请从独立应用 **[`segagent-research-v2/`](segagent-research-v2/)** 开始；[`segagent/`](segagent/) 是需要集成到外部 VoxTell 网页插件的早期扩展。
+## 项目状态
 
-> **研究软件。** 本项目未经临床验证，不是医疗器械。分割掩膜与 QC 结果需要专家解读；随附协议库为研究种子数据，不是获批临床指南。
+**Research v3 是本项目最终、唯一的正式实现**，由 `segagent-research-v3` 分支合并到 `main`。应用仍位于 **[`segagent-research-v2/`](segagent-research-v2/)**，目录名因路径兼容而保留，并不表示另一个可选版本。早期的 `segagent/` 只作为历史源码存档。
+
+> **研究软件。** 本项目未经临床验证，不是医疗器械。模型思考及模型间一致性不能作为临床证据；随附协议库是研究种子数据，不是获批指南。
 
 ## 主要能力
 
-| 能力 | Research v2 的实际实现 |
+| 能力 | Research v3 实现 |
 | --- | --- |
-| 类型化规划 | 通过 Pydantic 校验协议查询、分割、QC、澄清和最终回答五类动作。 |
-| 三维分割 | 将文本提示传给 VoxTell，保存 NIfTI 掩膜、PNG 叠加图、体积、包围盒和质心等数据。 |
-| 协议检索 | 查询本地 OAR 注册表，对用户补充的 Markdown / 文本文档进行词法与嵌入检索。 |
-| 轮廓 QC | 检查几何一致性、空掩膜、拓扑、参考体积和左右侧，并与模型参考掩膜计算 Dice 一致性。 |
-| 人工审查 | 图工作流产生分割后暂停，接收批准、拒绝或反馈，再从检查点继续。 |
-| 可检查的运行记录 | React/NiiVue 查看器、NDJSON 工作流事件、文件形式的病例与运行记录、SQLite 检查点。 |
-| 工具接入 | 三个 MCP 工具，以及实验性的 A2A JSON-RPC 适配器。 |
+| 持久化多轮对话 | 同一病例保留消息历史，继续回答澄清问题，并引用已有病例内掩膜。 |
+| 类型化规划 | 意图识别、确定性对话状态，以及协议查询、分割、检查、QC、视觉问答和最终回答等动作。 |
+| 提示词归一化 | 区分解剖概念、病理结构与临床描述，校验后再发送给 VoxTell。 |
+| 三维分割 | 对完整体数据推理，按有界提示词分块，保存掩膜、叠加图与测量值。 |
+| 掩膜感知分析 | 调取已有掩膜，测量几何属性，结合叠加图继续问答或生成报告。 |
+| 按 ROI 角色进行 QC | 区分器官、靶区、辅助结构及未解析标签，对适用器官进行模型对比并记录类型化指标证据。 |
+| 实时界面 | React/NiiVue 查看器，增量显示模型思考、步骤与生成的掩膜。 |
+| 工具接入 | MCP 工具与实验性 A2A 适配器复用同一组领域服务。 |
 
-模型使用预训练权重，仓库没有训练或微调流程。网页传输的是工作流事件，不是逐 token 的模型推理流。
-
-## 两套实现如何选择
-
-| | Research v2 | 原始插件扩展 |
-| --- | --- | --- |
-| 目录 | `segagent-research-v2/` | `segagent/` |
-| 形态 | 自带 FastAPI 后端与 React/NiiVue 前端 | 复制文件到外部 `voxtell-web-plugin` |
-| 规划方式 | 类型化 JSON 动作 | 自由文本 ReAct 动作解析 |
-| 状态管理 | 病例产物、运行记录、检查点恢复 | 原型实现自己的状态 |
-| 文档 | [安装指南](docs/getting-started.md) | [旧版集成说明](docs/legacy.md) |
-
-两者均需另行安装 VoxTell 并下载权重，配置变量和接口不能混用。本文描述的是当前 GitHub 仓库中的 Qwen2.5-VL 版本。
+模型使用预训练权重，仓库没有训练或微调流程。
 
 ## 快速开始
 
-需要 Python 3.11+、兼容的 PyTorch 环境、Node.js 22.12+ 和 VoxTell 模型。先按 [完整安装指南](docs/getting-started.md) 准备依赖与权重；本仓库尚无经实测验证的最低显存要求。
+需要 Python 3.11+、兼容的 PyTorch/torchvision、项目要求范围内的 Transformers 5.7+、Node.js 22.12+，并另外安装 VoxTell 与权重。先按 [完整安装指南](docs/getting-started.md) 准备环境。
 
 ```bash
 git clone https://github.com/Syndr0/SegAgent.git
@@ -58,16 +48,16 @@ cd SegAgent/segagent-research-v2
 cp .env.example .env
 ```
 
-编辑 `.env`：
+示例配置已默认启用 Qwen3.5 和 thinking。填写真实模型路径：
 
 ```dotenv
 SEGAGENT_PLANNER=qwen
-SEGAGENT_LLM_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+SEGAGENT_LLM_MODEL=Qwen/Qwen3.5-9B
+SEGAGENT_ENABLE_THINKING=true
 SEGAGENT_VOXTELL_MODEL=/absolute/path/to/voxtell_v1.1
-SEGAGENT_REQUIRE_MASK_APPROVAL=true
 ```
 
-在 `segagent-research-v2/` 启动后端：
+在应用目录启动后端：
 
 ```bash
 uvicorn backend.api:app --host 127.0.0.1 --port 8000 --workers 1
@@ -81,50 +71,50 @@ npm install
 npm run dev -- --host 127.0.0.1 --strictPort
 ```
 
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)，上传 `.nii` / `.nii.gz` 扫描并提交请求。模型在首次使用时加载。示例 `.env` 原本选择 `rule` 基线；改成 `qwen` 才启用多模态规划器。`rule` 模式的分割和专家 QC 仍需要真实 VoxTell。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)，上传 NIfTI 并发送消息。模型首次使用时加载；GPU 推理只启一个 API worker，不使用 `--reload`。
 
-浏览器访问的后端地址由 `VITE_API_BASE_URL` 决定，与后端的 `SEGAGENT_API_BASE_URL` 不同。完整配置见 [环境变量参考](docs/configuration.md)。
+[配置参考](docs/configuration.md) 包括独立设备放置、图像预算、分块、存储和前端地址。[四张 3090 配置](segagent-research-v2/.env.4x3090.example) 是一种布局示例，不是最低要求。`rule` 是同一应用中的开发基线，不是另一个产品版本。
 
-## 一次运行的流程
+## 对话工作流
 
-1. 上传 NIfTI 扫描，可附加处于同一网格的轮廓掩膜。
-2. 规划器根据图像切片、工具观察和 JSON schema 选择动作。
-3. 工具检索协议、执行完整三维分割，或检查已上传轮廓。
-4. 图工作流中的分割结果进入人工审查，接收批准、拒绝或反馈。
-5. 将最终回答与测量值、产物、观察和事件轨迹一起检查。
+1. 上传 `.nii` / `.nii.gz` 扫描，可附加同一网格的轮廓。
+2. 发送请求，工作流根据意图和病例对话决定执行动作或询问缺失信息。
+3. 检索协议、归一化提示词、调用 VoxTell、检查掩膜，或构建 QC 与报告证据。
+4. 在同一病例继续询问已有掩膜，回答待澄清的问题，或上传编辑后的掩膜。
+5. 结合测量值、产物、过程事件与局限检查最终结果。
 
-该审查中断只覆盖图工作流里的分割，QC 参考掩膜和 MCP 直接调用不使用同一个审批门，下载接口也没有审批限制。病例产物可以跨运行保留，但新问题会开启新运行，当前实现没有跨问题的持久化聊天记忆。
+明确命名的器官和特定病理结构可直接分割；按协议进行的 OAR 请求需要已提供或确认的治疗部位，明确点名的 OAR 可直接分割；泛指肿瘤时会询问空间信息，无法定位的尝试保持探索性标记。生成掩膜会直接出现在查看器中，没有强制批准/拒绝门。
 
-## 文档导航
+QC 将模型结果视为参考。GTV、CTV、PTV 等临床靶区被测量和空间描述，并标记为 `not_automatically_assessed`，不会自动判定正确；辅助结构和未解析标签单独报告。
 
-| 文档 | 内容 |
+## 文档与源码
+
+| 路径 | 内容 |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | 依赖、权重、前后端与首次工作流 |
-| [Architecture](docs/architecture.md) | 模块、工具、HTTP / MCP / A2A 接口与实现边界 |
-| [Configuration](docs/configuration.md) | 后端与前端环境变量、路径与默认值 |
-| [Legacy integration](docs/legacy.md) | 原始网页插件扩展的集成方法 |
-| [Experiments](segagent-research-v2/EXPERIMENTS.md) | 研究比较、消融与结果报告方法 |
-| [Contributing](CONTRIBUTING.md) | 缺陷报告、开发检查与提交约定 |
-| [Security](SECURITY.md) | 研究环境的数据处理与漏洞报告 |
+| [`segagent-research-v2/`](segagent-research-v2/) | 最终 Research v3 应用，保留历史目录名 |
+| [Architecture](docs/architecture.md) | 对话、模型、工具、QC、证据与接口 |
+| [Configuration](docs/configuration.md) | 环境变量、默认值、设备与持久化路径 |
+| [Getting started](docs/getting-started.md) | 依赖、权重和首次对话 |
+| [Experiments](segagent-research-v2/EXPERIMENTS.md) | 已实现评估与后续实验 |
+| [Contributing](CONTRIBUTING.md) | 开发与提交约定 |
+| [Security](SECURITY.md) | 数据处理与漏洞报告 |
+| `segagent/` | 历史原型存档 |
 
-## 测试与研究边界
+## 评估与研究边界
 
 ```bash
 cd segagent-research-v2
 pytest -q
 python evals/run_evals.py --dataset evals/golden_cases.jsonl
+python evals/run_model_matrix.py --case-id case_... --thinking both
 ```
 
-已有单元测试针对 schema、规则规划、检索和存储；评估脚本使用文本规则规划样例。它们不能证明真实模型分割准确率、Qwen 表现或临床效果，仓库尚未发布实测基准结果。默认 QC 服务也没有启用表面距离指标。
+文本样例检查规则规划和检索；模型矩阵比较 Qwen3.5-9B/27B 的 thinking 开关，直接调用真实多模态规划器，不等同于端到端分割或临床评估。单元测试覆盖对话、门控、提示词、证据、QC、存储及运行时保护，不加载真实权重。指标与局限见 [评估说明](segagent-research-v2/EXPERIMENTS.md)，本文不宣称实测基准结果。
 
-## 研究边界
-
-当前应用面向本地、去标识 NIfTI 数据研究，没有身份验证、自动去标识或生产部署栈。启发式证据检查和专家模型一致性不保证结果正确。DICOM 转换与 RTSTRUCT 相关代码属于旧版插件集成，不属于 v2 的上传接口。
+应用面向本地、去标识 NIfTI 研究，没有身份验证、自动去标识或生产部署栈。证据检查和 ROI 角色判定不能保证事实或临床正确性。研究应用之外的使用仍需临床专家复核。历史原型中的 DICOM/RTSTRUCT 集成不是当前上传接口。
 
 ## 贡献、引用与许可
 
-欢迎提交可复现的问题、文档改进和研究贡献。请先阅读 [贡献指南](CONTRIBUTING.md)，不要在 issue 或 PR 中上传医疗影像、身份信息、凭据或模型权重。
+欢迎按 [贡献指南](CONTRIBUTING.md) 提交改进。引用时请记录 commit、模型 revision、配置和数据划分，并按上游指引引用 [VoxTell](https://github.com/MIC-DKFZ/VoxTell)、[Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-9B) 等依赖。
 
-使用本项目发表结果时，请记录仓库 commit、模型检查点、配置和数据划分，并按上游指引引用 [VoxTell](https://github.com/MIC-DKFZ/VoxTell)、[Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) 等依赖。本仓库没有声明 SegAgent 论文或 DOI。
-
-仓库贡献采用 [MIT 许可证](LICENSE)。外部依赖、预训练权重及上游派生组件仍受各自许可证约束。
+仓库贡献采用 [MIT 许可证](LICENSE)，外部依赖、预训练权重及上游派生组件仍受各自许可证约束。

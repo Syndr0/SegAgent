@@ -1,8 +1,9 @@
 # Security policy
 
-SegAgent is research software. The current implementations do not provide an
-application authentication or authorization layer and are intended for local,
-controlled research use. Bind services to loopback by default. Public hosting
+SegAgent Research v3 is the current research application on `main`. Its source
+directory, `segagent-research-v2/`, retains a historical name. The application
+does not provide an authentication or authorization layer and is intended for
+local, controlled research use. Bind services to loopback by default. Public hosting
 requires a separate security assessment and appropriate access controls; CORS
 configuration is not authentication.
 
@@ -22,11 +23,12 @@ repository maintainer through a private contact method they publish on their
 GitHub profile. Do not include exploit details or sensitive data in a public
 issue while arranging private contact.
 
-Provide the affected commit or version, whether the issue concerns
-`segagent-research-v2/` or `segagent/`, expected impact, and minimal reproduction
-steps using synthetic data. Redact secrets, local identifiers, and patient
-information from attachments and logs.
+Provide the affected commit, component, expected impact, and minimal
+reproduction steps using synthetic data. If you are reporting a finding in the
+historical `segagent/` archive, identify that path explicitly; it is not an
+alternative supported application. Redact secrets, local identifiers, and
+patient information from attachments and logs.
 
 The repository does not currently publish a supported-version matrix or a
 guaranteed security response time. Include your exact commit so maintainers can
-assess the report against the relevant implementation.
+assess the affected code accurately.

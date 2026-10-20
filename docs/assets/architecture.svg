@@ -1,18 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1432" viewBox="0 0 1800 1432" role="img" aria-labelledby="title description">
-<title id="title">SegAgent Research v2 architecture</title>
-<desc id="description">A React interface sends case questions and review decisions to FastAPI. A checkpointed LangGraph workflow uses the Qwen2.5-VL planner to select protocol lookup, text-prompted VoxTell segmentation with human mask review, or contour quality control. Protocol lookup uses seed protocols and optional guideline text. Typed tool observations return to the planner. An evidence critic checks the final answer. Local knowledge, the independent VoxTell expert, file-backed artifacts, JSONL events and SQLite checkpoints support the workflow. MCP exposes tools directly; the A2A research adapter uses the workflow. Results stream to the interface as NDJSON.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1664" viewBox="0 0 1800 1664" role="img" aria-labelledby="title description">
+<title id="title">SegAgent Research v3 architecture</title>
+<desc id="description">A React workspace sends messages and referenced mask IDs to FastAPI. One conversation per case provides history and checkpointed LangGraph state. Typed intent and a dialogue state machine constrain the Qwen3.5-9B planner. Actions include protocol lookup, prompt-normalized VoxTell segmentation in bounded batches, existing-mask inspection, role-aware contour quality control, clarification that resumes the same turn, and visual question answering. Tool evidence returns to planning; a metric-aware grounding verifier and evidence critic guard final answers. Seed protocols, optional guideline text, independent VoxTell inference, file-backed artifacts, JSONL messages and events, and SQLite graph checkpoints support the workflow. Live NDJSON includes thinking_delta and workflow events; a complete answer event delivers the final response. MCP exposes tools; A2A is an auxiliary research adapter. These research checks are not clinical validation.</desc>
 <defs>
 <marker id="teal" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0L8 4.5L0 9Z" fill="#087F8C"/></marker>
 <marker id="muted" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0L8 4.5L0 9Z" fill="#52657C"/></marker>
 <marker id="purple" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0L8 4.5L0 9Z" fill="#6855B3"/></marker>
 </defs>
 <g font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif">
-<rect x="0" y="0" width="1800" height="1432" rx="0" fill="#F7F9FC" stroke="none" stroke-width="1.5" />
-<rect x="30" y="30" width="1740" height="1372" rx="24" fill="white" stroke="#E2E8F0" stroke-width="1.5" />
+<rect x="0" y="0" width="1800" height="1664" rx="0" fill="#F7F9FC" stroke="none" stroke-width="1.5" />
+<rect x="30" y="30" width="1740" height="1604" rx="24" fill="white" stroke="#E2E8F0" stroke-width="1.5" />
 <g transform="translate(64 63) scale(1.25)" fill="none" stroke="#087F8C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="m0 8 16-8 16 8-16 8Z"/><path d="m0 17 16 8 16-8M0 26l16 8 16-8"/></g>
 <text x="122" y="93" font-size="42" font-weight="700" fill="#172B46" text-anchor="start" >SegAgent</text>
 <rect x="338" y="64" width="186" height="30" rx="15" fill="#F0EDFA" stroke="none" stroke-width="1.5" />
-<text x="431.0" y="85" font-size="19" font-weight="600" fill="#6855B3" text-anchor="middle" >RESEARCH V2</text>
+<text x="431.0" y="85" font-size="19" font-weight="600" fill="#6855B3" text-anchor="middle" >RESEARCH V3</text>
 <text x="64" y="130" font-size="25" font-weight="400" fill="#52657C" text-anchor="start" >Evidence-first orchestration for 3D medical images</text>
 <text x="1736" y="91" font-size="19" font-weight="600" fill="#52657C" text-anchor="end" letter-spacing="1.6">SYSTEM ARCHITECTURE</text>
 <rect x="64" y="170" width="300" height="150" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
@@ -24,15 +24,15 @@
 <rect x="420" y="170" width="460" height="150" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
 <g transform="translate(446 194) scale(1)" fill="none" stroke="#087F8C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><rect x="0" y="1" width="34" height="25" rx="4"/><path d="M11 34h12M17 26v8"/></g>
 <text x="498" y="221" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >React research workspace</text>
-<text x="446" y="263" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Questions + review decisions</text>
-<text x="446" y="294" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >NDJSON trace · masks · overlays</text>
+<text x="446" y="263" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Messages + referenced mask IDs</text>
+<text x="446" y="294" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Live NDJSON · viewer · edited masks</text>
 <path d="M880 222H936" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
 <path d="M936 282H880" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
 <rect x="936" y="170" width="292" height="150" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
 <g transform="translate(962 194) scale(1)" fill="none" stroke="#087F8C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="m10 5-9 12 9 12m14-24 9 12-9 12M20 0l-6 34"/></g>
 <text x="1014" y="221" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >FastAPI</text>
 <text x="962" y="263" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Case + artifact API</text>
-<text x="962" y="294" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Run / resume streams</text>
+<text x="962" y="294" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Conversation streams</text>
 <rect x="1284" y="170" width="452" height="150" rx="16" fill="#FBFAFE" stroke="#DED7EF" stroke-width="1.5" />
 <g transform="translate(1310 194) scale(1)" fill="none" stroke="#6855B3" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="M9 0v10m16-10v10M5 10h24v6a12 12 0 0 1-24 0Zm12 18v9"/></g>
 <text x="1362" y="221" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >Auxiliary agent access</text>
@@ -41,99 +41,125 @@
 <path d="M1284 282H1228" fill="none" stroke="#6855B3" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#purple)"/>
 <path d="M1056 320V364" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
 <path d="M1112 364V320" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
-<text x="1037" y="348" font-size="17" font-weight="400" fill="#087F8C" text-anchor="end" >run</text>
+<text x="1037" y="348" font-size="17" font-weight="400" fill="#087F8C" text-anchor="end" >turn</text>
 <text x="1130" y="348" font-size="17" font-weight="400" fill="#52657C" text-anchor="start" >events</text>
-<rect x="64" y="364" width="1164" height="784" rx="20" fill="#F9FBFE" stroke="#C5D3E3" stroke-width="1.5" />
-<text x="96" y="403" font-size="26" font-weight="650" fill="#172B46" text-anchor="start" >LangGraph workflow</text>
-<text x="376" y="403" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >checkpointed · bounded steps · pause / resume</text>
-<path d="M1696 320V347H1180V420" fill="none" stroke="#6855B3" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#purple)"/>
+<rect x="64" y="364" width="1164" height="1016" rx="20" fill="#F9FBFE" stroke="#C5D3E3" stroke-width="1.5" />
+<text x="96" y="403" font-size="26" font-weight="650" fill="#172B46" text-anchor="start" >LangGraph conversation workflow</text>
+<text x="558" y="403" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >checkpointed · bounded steps · clarification resume</text>
+<path d="M1696 320V347H1210V544" fill="none" stroke="#6855B3" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#purple)"/>
 <text x="1452" y="343" font-size="17" font-weight="400" fill="#6855B3" text-anchor="start" >MCP → tools</text>
-<rect x="484" y="420" width="736" height="526" rx="17" fill="#F0F6F8" stroke="#D5E4E9" stroke-width="1.5" />
-<text x="508" y="456" font-size="18" font-weight="700" fill="#087F8C" text-anchor="start" letter-spacing="1.5">TYPED TOOL EXECUTION</text>
-<path d="M424 518H462V848H508" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
-<path d="M462 518H508" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
-<path d="M462 668H508" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
-<text x="447" y="604" font-size="18" font-weight="400" fill="#087F8C" text-anchor="middle" transform="rotate(-90 447 604)">select one action</text>
-<path d="M850 946V968H444V722H424" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
-<text x="770" y="996" font-size="20" font-weight="400" fill="#52657C" text-anchor="middle" >Typed observations + artifact evidence</text>
-<path d="M260 754V1064H508" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
-<text x="284" y="1049" font-size="20" font-weight="400" fill="#087F8C" text-anchor="start" >final / ask_user</text>
-<rect x="96" y="450" width="328" height="304" rx="16" fill="white" stroke="#B9CDE4" stroke-width="1.5" />
-<text x="124" y="493" font-size="28" font-weight="650" fill="#172B46" text-anchor="start" >Qwen planner</text>
-<text x="124" y="529" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Qwen2.5-VL-7B-Instruct</text>
-<path d="M124 551H396" stroke="#E0E8F0" stroke-width="1.5"/>
-<text x="124" y="584" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Image grounding views</text>
-<text x="124" y="614" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >+ prior mask overlays</text>
-<text x="124" y="644" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >+ typed tool observations</text>
-<text x="124" y="683" font-size="21" font-weight="600" fill="#087F8C" text-anchor="start" >JSON → PlannerDecision</text>
-<rect x="124" y="708" width="273" height="30" rx="15" fill="#EFF3F8" stroke="none" stroke-width="1.5" />
-<text x="260.5" y="729" font-size="16.5" font-weight="600" fill="#52657C" text-anchor="middle" >RulePlanner baseline available</text>
-<rect x="508" y="480" width="688" height="112" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
-<text x="536" y="519" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >lookup_protocol</text>
-<text x="536" y="557" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Site-specific OAR list + retrieved passages</text>
-<rect x="508" y="630" width="688" height="142" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
-<text x="536" y="669" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >segment</text>
-<text x="536" y="709" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >VoxTell masks + measurements</text>
-<text x="536" y="740" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >NIfTI + PNG overlay artifacts</text>
-<path d="M864 714H902" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
-<rect x="902" y="677" width="268" height="72" rx="12" fill="#F4F0FC" stroke="#D9CDEE" stroke-width="1.5" />
-<text x="1036" y="705" font-size="21" font-weight="650" fill="#6855B3" text-anchor="middle" >Human mask review</text>
-<text x="1036" y="732" font-size="19" font-weight="400" fill="#6855B3" text-anchor="middle" >interrupt / resume</text>
-<rect x="508" y="810" width="688" height="112" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
-<text x="536" y="849" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >run_qc</text>
-<text x="536" y="887" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Contour geometry + VoxTell reference disagreement</text>
-<rect x="508" y="1012" width="368" height="104" rx="15" fill="white" stroke="#B9CDE4" stroke-width="1.5" />
-<text x="536" y="1048" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >Evidence critic</text>
-<text x="536" y="1080" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Numeric + evidence checks</text>
-<text x="536" y="1105" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Guarded answer or limitation</text>
-<path d="M876 1064H936" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
-<rect x="936" y="1012" width="260" height="104" rx="15" fill="#EAF5F5" stroke="#B8DCDD" stroke-width="1.5" />
-<text x="962" y="1048" font-size="24" font-weight="650" fill="#087F8C" text-anchor="start" >Answer / clarify</text>
-<text x="962" y="1080" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Recorded run events</text>
-<text x="962" y="1105" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >+ artifact references</text>
-<text x="1284" y="403" font-size="19" font-weight="600" fill="#52657C" text-anchor="start" letter-spacing="1.5">SHARED RESOURCES</text>
-<rect x="1284" y="480" width="452" height="112" rx="16" fill="#F7FAFD" stroke="#CDD9E7" stroke-width="1.5" />
-<g transform="translate(1310 502) scale(0.85)" fill="none" stroke="#087F8C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="M5 0h20l8 8v28H5Zm20 0v9h8M12 16h14M12 23h14M12 30h10"/></g>
-<text x="1357" y="519" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >Local knowledge</text>
-<text x="1310" y="553" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Seed protocols + optional guideline text</text>
-<text x="1310" y="579" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Aliases · BM25 · semantic retrieval</text>
-<path d="M1196 536H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
-<rect x="1284" y="630" width="452" height="292" rx="16" fill="#F7F5FC" stroke="#D3CBE8" stroke-width="1.5" />
-<g transform="translate(1310 653) scale(1)" fill="none" stroke="#6855B3" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="m1 9 15-8 15 8v18l-15 8-15-8Z"/><path d="m1 9 15 8 15-8M16 17v18"/></g>
-<text x="1358" y="680" font-size="28" font-weight="650" fill="#172B46" text-anchor="start" >VoxTell expert</text>
-<text x="1310" y="719" font-size="23" font-weight="500" fill="#6855B3" text-anchor="start" >Text-prompted 3D segmentation</text>
-<path d="M1310 740H1710" stroke="#DED6ED" stroke-width="1.5"/>
-<text x="1310" y="775" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Image volume + structure prompts</text>
-<text x="1310" y="808" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >→ binary masks in the case grid</text>
-<text x="1310" y="851" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Shared text encoder for retrieval</text>
-<text x="1310" y="891" font-size="20" font-weight="500" fill="#6855B3" text-anchor="start" >Independent of the Qwen planner</text>
-<path d="M1196 649H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
-<path d="M1196 866H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
-<path d="M1508 630V592" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
-<text x="1526" y="619" font-size="17" font-weight="400" fill="#52657C" text-anchor="start" >text embeddings</text>
-<rect x="1284" y="1012" width="452" height="104" rx="15" fill="#FBFCFE" stroke="#D9E1EB" stroke-width="1.5" />
-<text x="1310" y="1049" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >Optional observability</text>
-<text x="1310" y="1081" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >OpenTelemetry agent + tool spans</text>
-<text x="1310" y="1106" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Identifier and count spans</text>
-<path d="M1228 1094H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
-<path d="M688 1148V1204" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
-<text x="707" y="1184" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >persist + replay</text>
-<rect x="64" y="1204" width="1164" height="138" rx="16" fill="#F3F7FB" stroke="#C8D5E4" stroke-width="1.5" />
-<g transform="translate(96 1226) scale(1)" fill="none" stroke="#52657C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><ellipse cx="17" cy="6" rx="16" ry="6"/><path d="M1 6v23c0 8 32 8 32 0V6M1 17c0 8 32 8 32 0"/></g>
-<text x="146" y="1253" font-size="27" font-weight="650" fill="#172B46" text-anchor="start" >Case-scoped persistence</text>
-<text x="96" y="1291" font-size="23" font-weight="400" fill="#52657C" text-anchor="start" >NIfTI inputs · masks · overlays · JSON records · append-only JSONL events</text>
-<text x="96" y="1323" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >LangGraph checkpoints: SQLite     |     SHA-256 artifact provenance</text>
-<rect x="1284" y="1204" width="452" height="138" rx="16" fill="#FAF8FD" stroke="#DED7EC" stroke-width="1.5" />
-<text x="1310" y="1246" font-size="18" font-weight="700" fill="#6855B3" text-anchor="start" letter-spacing="1.2">RESEARCH CONTRACT</text>
-<text x="1310" y="1285" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Human review guides continuation.</text>
-<text x="1310" y="1316" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Expert masks are references, not truth.</text>
-<path d="M64 1380H105" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
-<text x="120" y="1387" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Workflow / user action</text>
-<path d="M418 1380H459" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
-<text x="474" y="1387" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Evidence / events</text>
-<path d="M724 1380H765" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
-<text x="780" y="1387" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Resource access</text>
-<path d="M1027 1380H1068" fill="none" stroke="#6855B3" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#purple)"/>
-<text x="1083" y="1387" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Auxiliary integration</text>
-<text x="1736" y="1387" font-size="19" font-weight="400" fill="#52657C" text-anchor="end" >segagent-research-v2/</text>
+<rect x="96" y="436" width="1100" height="90" rx="14" fill="#EDF3FA" stroke="#D1DFEE" stroke-width="1.5" />
+<text x="124" y="470" font-size="24" font-weight="650" fill="#172B46" text-anchor="start" >Case conversation</text>
+<text x="124" y="503" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >History + viewer mask IDs</text>
+<path d="M516 454L516 508" stroke="#CFDBE9" stroke-width="1.5"/>
+<text x="546" y="470" font-size="24" font-weight="650" fill="#172B46" text-anchor="start" >Typed intent</text>
+<text x="546" y="503" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Task + target classification</text>
+<path d="M872 454L872 508" stroke="#CFDBE9" stroke-width="1.5"/>
+<text x="902" y="470" font-size="24" font-weight="650" fill="#172B46" text-anchor="start" >Dialogue FSM</text>
+<text x="902" y="503" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Stages + duplicate guards</text>
+<path d="M260 526V604" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
+<text x="280" y="568" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >turn context</text>
+<rect x="484" y="544" width="736" height="638" rx="17" fill="#F0F6F8" stroke="#D5E4E9" stroke-width="1.5" />
+<text x="508" y="582" font-size="18" font-weight="700" fill="#087F8C" text-anchor="start" letter-spacing="1.5">TYPED NEXT ACTIONS</text>
+<path d="M424 742H484" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
+<path d="M734 1182V1206H444V878H424" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
+<text x="600" y="1233" font-size="20" font-weight="400" fill="#52657C" text-anchor="middle" >Observations + reply context</text>
+<path d="M260 908V1304H508" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
+<text x="284" y="1289" font-size="20" font-weight="400" fill="#087F8C" text-anchor="start" >final</text>
+<path d="M1027 1150V1230H760V1252" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
+<text x="1044" y="1225" font-size="18" font-weight="400" fill="#087F8C" text-anchor="start" >visual answer</text>
+<rect x="96" y="604" width="328" height="304" rx="16" fill="white" stroke="#B9CDE4" stroke-width="1.5" />
+<text x="124" y="647" font-size="28" font-weight="650" fill="#172B46" text-anchor="start" >Qwen planner</text>
+<text x="124" y="683" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Qwen3.5-9B · default</text>
+<path d="M124 705H396" stroke="#E0E8F0" stroke-width="1.5"/>
+<text x="124" y="739" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Grounding views + masks</text>
+<text x="124" y="771" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Planning + visual answers</text>
+<text x="124" y="803" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Prompt normalization</text>
+<text x="124" y="842" font-size="21" font-weight="600" fill="#087F8C" text-anchor="start" >Validated JSON decisions</text>
+<rect x="124" y="862" width="273" height="30" rx="15" fill="#EFF3F8" stroke="none" stroke-width="1.5" />
+<text x="260.5" y="883" font-size="16.5" font-weight="600" fill="#52657C" text-anchor="middle" >RulePlanner baseline available</text>
+<rect x="508" y="604" width="688" height="98" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
+<text x="536" y="642" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >lookup_protocol</text>
+<text x="536" y="680" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >Site-specific OAR list + retrieved passages</text>
+<rect x="508" y="738" width="688" height="120" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
+<text x="536" y="777" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >segment</text>
+<text x="536" y="811" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Normalize prompts → VoxTell</text>
+<text x="536" y="841" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Masks · measurements · overlays</text>
+<rect x="924" y="766" width="246" height="66" rx="12" fill="#F4F0FC" stroke="#D9CDEE" stroke-width="1.5" />
+<text x="1047" y="793" font-size="19" font-weight="650" fill="#6855B3" text-anchor="middle" >Bounded prompt batches</text>
+<text x="1047" y="819" font-size="18" font-weight="400" fill="#6855B3" text-anchor="middle" >default: 4 / chunk</text>
+<rect x="508" y="894" width="330" height="110" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
+<text x="536" y="932" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >inspect_mask</text>
+<text x="536" y="965" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Existing mask measurements</text>
+<text x="536" y="990" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Artifact IDs + image grid</text>
+<rect x="858" y="894" width="338" height="110" rx="16" fill="white" stroke="#CDD8E5" stroke-width="1.5" />
+<text x="886" y="932" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >run_qc</text>
+<text x="886" y="965" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >ROI roles + model comparison</text>
+<text x="886" y="990" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Metrics + evidence records</text>
+<rect x="508" y="1040" width="330" height="110" rx="16" fill="#FAF8FE" stroke="#D9D1EB" stroke-width="1.5" />
+<text x="536" y="1078" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >ask_user</text>
+<text x="536" y="1110" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Clarification → reply → resume</text>
+<text x="536" y="1135" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >OAR / target / report dialogue</text>
+<rect x="858" y="1040" width="338" height="110" rx="16" fill="#FAF8FE" stroke="#D9D1EB" stroke-width="1.5" />
+<text x="886" y="1078" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >answer_question</text>
+<text x="886" y="1110" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Qwen image / mask VQA</text>
+<text x="886" y="1135" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Uses recorded measurements</text>
+<rect x="508" y="1252" width="368" height="104" rx="15" fill="white" stroke="#B9CDE4" stroke-width="1.5" />
+<text x="536" y="1288" font-size="24" font-weight="650" fill="#172B46" text-anchor="start" >Evidence critic + verifier</text>
+<text x="536" y="1320" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Metric / unit / citation grounding</text>
+<text x="536" y="1345" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Guarded answer or evidence fallback</text>
+<path d="M876 1304H936" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
+<rect x="936" y="1252" width="260" height="104" rx="15" fill="#EAF5F5" stroke="#B8DCDD" stroke-width="1.5" />
+<text x="962" y="1288" font-size="23" font-weight="650" fill="#087F8C" text-anchor="start" >Answer + evidence</text>
+<text x="962" y="1320" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Recorded run events</text>
+<text x="962" y="1345" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >+ artifact references</text>
+<text x="1284" y="582" font-size="19" font-weight="600" fill="#52657C" text-anchor="start" letter-spacing="1.5">SHARED RESOURCES</text>
+<rect x="1284" y="604" width="452" height="98" rx="16" fill="#F7FAFD" stroke="#CDD9E7" stroke-width="1.5" />
+<g transform="translate(1310 622) scale(0.85)" fill="none" stroke="#087F8C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="M5 0h20l8 8v28H5Zm20 0v9h8M12 16h14M12 23h14M12 30h10"/></g>
+<text x="1357" y="642" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >Local knowledge</text>
+<text x="1310" y="673" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Seed protocols + optional guideline text</text>
+<text x="1310" y="695" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Aliases · BM25 · semantic retrieval</text>
+<path d="M1196 653H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
+<rect x="1284" y="738" width="452" height="266" rx="16" fill="#F7F5FC" stroke="#D3CBE8" stroke-width="1.5" />
+<g transform="translate(1310 756) scale(1)" fill="none" stroke="#6855B3" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><path d="m1 9 15-8 15 8v18l-15 8-15-8Z"/><path d="m1 9 15 8 15-8M16 17v18"/></g>
+<text x="1358" y="783" font-size="28" font-weight="650" fill="#172B46" text-anchor="start" >VoxTell expert</text>
+<text x="1310" y="820" font-size="23" font-weight="500" fill="#6855B3" text-anchor="start" >Text-prompted 3D segmentation</text>
+<path d="M1310 839H1710" stroke="#DED6ED" stroke-width="1.5"/>
+<text x="1310" y="873" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >RAS-aligned image + typed prompts</text>
+<text x="1310" y="906" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Bounded batches → masks in case grid</text>
+<text x="1310" y="944" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >Shared text encoder for retrieval</text>
+<text x="1310" y="981" font-size="20" font-weight="500" fill="#6855B3" text-anchor="start" >Independent of Qwen3.5</text>
+<path d="M1196 792H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
+<path d="M1196 952H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
+<path d="M1508 738V702" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
+<text x="1526" y="729" font-size="17" font-weight="400" fill="#52657C" text-anchor="start" >text embeddings</text>
+<rect x="1284" y="1040" width="452" height="110" rx="15" fill="#FBFCFE" stroke="#D9E1EB" stroke-width="1.5" />
+<text x="1310" y="1078" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >Optional observability</text>
+<text x="1310" y="1110" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >OpenTelemetry agent + tool spans</text>
+<text x="1310" y="1135" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Identifier and count spans</text>
+<path d="M1228 1095H1284" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
+<rect x="1284" y="1252" width="452" height="104" rx="15" fill="#F5F9FC" stroke="#D2DFEA" stroke-width="1.5" />
+<text x="1310" y="1288" font-size="25" font-weight="650" fill="#172B46" text-anchor="start" >Incremental NDJSON</text>
+<text x="1310" y="1320" font-size="21" font-weight="400" fill="#52657C" text-anchor="start" >thinking_delta · workflow events</text>
+<text x="1310" y="1345" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >Final response: complete answer event</text>
+<path d="M688 1380V1436" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
+<text x="707" y="1416" font-size="19" font-weight="400" fill="#52657C" text-anchor="start" >persist + replay</text>
+<rect x="64" y="1436" width="1164" height="138" rx="16" fill="#F3F7FB" stroke="#C8D5E4" stroke-width="1.5" />
+<g transform="translate(96 1458) scale(1)" fill="none" stroke="#52657C" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"><ellipse cx="17" cy="6" rx="16" ry="6"/><path d="M1 6v23c0 8 32 8 32 0V6M1 17c0 8 32 8 32 0"/></g>
+<text x="146" y="1485" font-size="27" font-weight="650" fill="#172B46" text-anchor="start" >Case + conversation persistence</text>
+<text x="96" y="1523" font-size="23" font-weight="400" fill="#52657C" text-anchor="start" >Cases · conversation messages · masks · overlays · JSONL run events</text>
+<text x="96" y="1555" font-size="22" font-weight="400" fill="#52657C" text-anchor="start" >SQLite graph checkpoints · SHA-256 artifacts · typed metric evidence</text>
+<rect x="1284" y="1436" width="452" height="138" rx="16" fill="#FAF8FD" stroke="#DED7EC" stroke-width="1.5" />
+<text x="1310" y="1478" font-size="18" font-weight="700" fill="#6855B3" text-anchor="start" letter-spacing="1.2">RESEARCH ONLY</text>
+<text x="1310" y="1517" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >These checks are not clinical validation.</text>
+<text x="1310" y="1548" font-size="20" font-weight="400" fill="#52657C" text-anchor="start" >Expert masks are references, not truth.</text>
+<path d="M64 1612H105" fill="none" stroke="#087F8C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#teal)"/>
+<text x="120" y="1619" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Workflow / user action</text>
+<path d="M418 1612H459" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"  marker-end="url(#muted)"/>
+<text x="474" y="1619" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Evidence / events</text>
+<path d="M724 1612H765" fill="none" stroke="#52657C" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#muted)"/>
+<text x="780" y="1619" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Resource access</text>
+<path d="M1027 1612H1068" fill="none" stroke="#6855B3" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 6" marker-end="url(#purple)"/>
+<text x="1083" y="1619" font-size="18" font-weight="400" fill="#52657C" text-anchor="start" >Auxiliary integration</text>
+<text x="1736" y="1619" font-size="19" font-weight="400" fill="#52657C" text-anchor="end" >SegAgent Research v3</text>
 </g></svg>

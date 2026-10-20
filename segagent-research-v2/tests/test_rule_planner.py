@@ -21,7 +21,7 @@ class RulePlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, PlannerAction.SEGMENT)
-        self.assertEqual(decision.structures, ["right kidney", "left kidney"])
+        self.assertEqual(decision.structures, ["left kidney", "right kidney"])
 
     def test_protocol_question_routes_to_lookup(self) -> None:
         question = "Which OARs are in the prostate protocol?"
@@ -43,6 +43,15 @@ class RulePlannerTests(unittest.TestCase):
 
         self.assertEqual(decision.action, PlannerAction.SEGMENT)
         self.assertEqual(decision.structures, ["bladder", "rectum"])
+
+    def test_qc_request_routes_to_qc(self) -> None:
+        decision = self.planner.decide(
+            "case_000000000000",
+            "Run QC and audit the uploaded contours.",
+            1,
+            [],
+        )
+        self.assertEqual(decision.action, PlannerAction.RUN_QC)
 
     def test_unsupported_question_requests_clarification(self) -> None:
         decision = self.planner.decide(

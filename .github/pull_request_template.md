@@ -1,7 +1,8 @@
 ## Problem and resulting behavior
 
-Describe the problem, the change, and the affected implementation (research v2,
-legacy, or shared documentation). Link related issues when applicable.
+Describe the problem, the change, and the affected component of SegAgent Research
+v3 on main. The application remains in segagent-research-v2/ for historical path
+compatibility. Link related issues when applicable.
 
 ## Validation
 

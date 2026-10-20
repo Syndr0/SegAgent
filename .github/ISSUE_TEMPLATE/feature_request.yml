@@ -5,16 +5,22 @@ body:
   - type: markdown
     attributes:
       value: |
-        Search existing issues before proposing a change. Use synthetic examples
-        and keep patient information, credentials, and private data out of this issue.
+        Propose improvements to the current SegAgent Research v3 application on
+        main. Its source directory retains the historical name segagent-research-v2.
+        Search existing issues first. Use synthetic examples and keep patient
+        information, credentials, and private data out of this issue.
   - type: dropdown
-    id: implementation
+    id: component
     attributes:
-      label: Target implementation
+      label: Target component
       options:
-        - Research v2 (segagent-research-v2)
-        - Legacy (segagent)
-        - Repository documentation or shared files
+        - Planning or dialogue
+        - Segmentation or image handling
+        - Evidence or contour QC
+        - Retrieval or protocols
+        - Frontend or viewer
+        - Storage or interoperability
+        - Documentation or repository files
         - Unsure
     validations:
       required: true

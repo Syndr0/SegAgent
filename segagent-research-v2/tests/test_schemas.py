@@ -4,7 +4,12 @@ import unittest
 
 from pydantic import ValidationError
 
-from backend.schemas import ApprovalDecision, PlannerAction, PlannerDecision, SegmentRequest
+from backend.schemas import (
+    MessageArtifactContext,
+    PlannerAction,
+    PlannerDecision,
+    SegmentRequest,
+)
 
 
 class SchemaTests(unittest.TestCase):
@@ -24,10 +29,14 @@ class SchemaTests(unittest.TestCase):
                 confidence=0.9,
             )
 
-    def test_feedback_decision_requires_text(self) -> None:
-        with self.assertRaises(ValidationError):
-            ApprovalDecision(decision="feedback", feedback="  ")
-
+    def test_message_artifact_context_deduplicates_ids(self) -> None:
+        context = MessageArtifactContext(
+            referenced_artifact_ids=["artifact_a", "artifact_a"],
+            visible_mask_ids=["artifact_b", "artifact_b"],
+            selected_mask_id="artifact_b",
+        )
+        self.assertEqual(context.referenced_artifact_ids, ["artifact_a"])
+        self.assertEqual(context.visible_mask_ids, ["artifact_b"])
 
 if __name__ == "__main__":
     unittest.main()

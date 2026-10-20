@@ -1,15 +1,29 @@
-import type { ApprovalRequest, CaseRecord, RunEvent, RunHistory } from './types';
+import type {
+  ArtifactRef,
+  CaseRecord,
+  ConversationHistory,
+  MessageContext,
+  RunEvent,
+  RunHistory,
+} from './types';
 
 export const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
 const RUN_EVENT_TYPES = new Set<RunEvent['type']>([
   'run_started',
   'planner_decision',
+  'thinking_delta',
+  'thinking',
+  'reasoning_summary',
+  'phase_started',
+  'phase_completed',
+  'phase_failed',
   'tool_started',
   'observation',
   'artifact',
-  'approval_required',
-  'approval_recorded',
+  'question_pending',
+  'reply_recorded',
+  'answer_delta',
   'answer',
   'error',
   'run_completed',
@@ -33,6 +47,28 @@ function parseRunEvent(line: string): RunEvent {
     throw new Error('The server returned an incomplete event.');
   }
   return event as RunEvent;
+}
+
+function yieldForLivePaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== 'function') {
+    return new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+  return new Promise<void>(resolve => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      resolve();
+    };
+    // A background tab may suspend animation frames. Keep consuming the
+    // response in that case instead of stalling the model request indefinitely.
+    const fallback = setTimeout(finish, 50);
+    requestAnimationFrame(() => {
+      clearTimeout(fallback);
+      // Continue in the task after this frame has had a chance to paint.
+      setTimeout(finish, 0);
+    });
+  });
 }
 
 async function errorMessage(response: Response): Promise<string> {
@@ -90,7 +126,9 @@ export async function readEventStream(
   if (!response.ok || !response.body) throw new Error(await errorMessage(response));
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const liveDeltaGroupSize = 4;
   let buffer = '';
+  let liveDeltasSincePaint = 0;
   for (;;) {
     const { done, value } = await reader.read();
     buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -98,25 +136,57 @@ export async function readEventStream(
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
-      if (line) onEvent(parseRunEvent(line));
+      if (line) {
+        const event = parseRunEvent(line);
+        const isLiveDelta = event.type === 'thinking_delta' || event.type === 'answer_delta';
+        if (liveDeltasSincePaint > 0 && !isLiveDelta) {
+          await yieldForLivePaint();
+          liveDeltasSincePaint = 0;
+        }
+        onEvent(event);
+        if (isLiveDelta) {
+          liveDeltasSincePaint += 1;
+          if (liveDeltasSincePaint >= liveDeltaGroupSize) {
+            // Bound each React update group even when a proxy coalesces many
+            // NDJSON events into one network chunk.
+            await yieldForLivePaint();
+            liveDeltasSincePaint = 0;
+          }
+        }
+      }
       newline = buffer.indexOf('\n');
+    }
+    if (liveDeltasSincePaint > 0) {
+      // Paint a partial group before waiting for more bytes.
+      await yieldForLivePaint();
+      liveDeltasSincePaint = 0;
     }
     if (done) break;
   }
-  if (buffer.trim()) onEvent(parseRunEvent(buffer));
+  if (buffer.trim()) {
+    const event = parseRunEvent(buffer);
+    onEvent(event);
+    if (event.type === 'thinking_delta' || event.type === 'answer_delta') {
+      await yieldForLivePaint();
+    }
+  }
 }
 
-export async function startRun(
+/** Send one conversational turn. Viewer artifact IDs travel with the message,
+ *  so references such as "this contour" resolve to explicit case-owned masks.
+ *  The server decides whether this opens a new turn or answers a pending one. */
+export async function sendMessage(
   caseId: string,
   question: string,
   onEvent: (event: RunEvent) => void,
   onRunId: (runId: string) => void,
   signal?: AbortSignal,
+  context: MessageContext = {},
 ): Promise<string> {
-  const response = await fetch(`${API}/api/cases/${caseId}/runs`, {
+  const response = await fetch(`${API}/api/cases/${caseId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, ...context }),
     signal,
   });
   const runId = response.headers.get('X-Run-Id') || '';
@@ -126,20 +196,26 @@ export async function startRun(
   return runId;
 }
 
-export async function resumeRun(
-  runId: string,
-  decision: 'approve' | 'reject' | 'feedback',
-  feedback: string,
-  onEvent: (event: RunEvent) => void,
+export async function uploadEditedMask(
+  caseId: string,
+  structure: string,
+  file: File,
+  derivedFrom?: string,
+  targetType: string = 'unknown',
   signal?: AbortSignal,
-): Promise<void> {
-  const response = await fetch(`${API}/api/runs/${runId}/resume`, {
+): Promise<ArtifactRef> {
+  const form = new FormData();
+  form.append('structure', structure);
+  form.append('file', file);
+  if (derivedFrom) form.append('derived_from', derivedFrom);
+  form.append('target_type', targetType);
+  const response = await fetch(`${API}/api/cases/${caseId}/edited-mask`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ decision, feedback: feedback || null }),
+    body: form,
     signal,
   });
-  await readEventStream(response, onEvent);
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response.json();
 }
 
 export const caseImageUrl = (caseId: string) => `${API}/api/cases/${caseId}/image`;
@@ -158,6 +234,11 @@ export async function getRun(runId: string, signal?: AbortSignal): Promise<RunHi
   return response.json();
 }
 
-export function approvalFromEvent(event: RunEvent): ApprovalRequest {
-  return event.payload as unknown as ApprovalRequest;
+export async function getConversation(
+  caseId: string,
+  signal?: AbortSignal,
+): Promise<ConversationHistory> {
+  const response = await fetch(`${API}/api/cases/${caseId}/conversation`, { signal });
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response.json();
 }

@@ -1,32 +1,24 @@
-# Evaluation and proposed research protocol
+# Evaluation and research protocol
 
-This document distinguishes the evaluation implemented in this repository from
-experiments that require additional datasets, instrumentation, or code. It does
-not report benchmark results. SegAgent is research software; passing its tests
-or text fixtures does not establish segmentation quality or clinical validity.
+This document describes evaluation support in **SegAgent Research v3**, the
+current implementation on `main`. Its source remains in
+`segagent-research-v2/` for historical path compatibility. This document reports
+no benchmark results; proposed experiments are identified separately from the
+runners and runtime measurements already implemented.
 
-## Implemented evaluation
+## Implemented evaluation runners
+
+### Deterministic routing fixtures
 
 [`evals/run_evals.py`](evals/run_evals.py) evaluates `RulePlanner` against
-[`evals/golden_cases.jsonl`](evals/golden_cases.jsonl). The bundled dataset contains
-six text fixtures: explicit structure requests, protocol-driven structure
-selection, a QC request, and an ambiguous request.
+[`evals/golden_cases.jsonl`](evals/golden_cases.jsonl). The bundled dataset
+contains six text fixtures: explicit structure requests, protocol-driven
+structure selection, a QC request, and an ambiguous request.
 
 The runner constructs `HybridKnowledgeBase` with `embed_fn=None`. Protocol
-lookup uses its alias matching and lexical BM25 fallback without semantic
-embeddings. It asks the rule planner for a first decision and, only after a
-protocol-lookup decision, feeds the lookup result back for a second decision.
-
-The runner does not load Qwen or VoxTell, read image volumes, execute segmentation
-or QC, run the durable workflow, or exercise human review. A predicted `segment`
-or `run_qc` action is a routing decision, not a completed tool invocation.
-
-This retrieval configuration is specific to the evaluation script. The runtime
-service supplies an embedding function to its knowledge base and can use hybrid
-retrieval even when the selected runtime planner is `rule`. Do not label the
-runtime rule planner as inherently BM25-only.
-
-### Run the fixture evaluation
+lookup uses alias matching and lexical BM25 fallback without semantic
+embeddings. It evaluates a first decision and, after a protocol-lookup action,
+feeds the lookup result back for a second decision.
 
 With the project dependencies installed, run from `segagent-research-v2/`:
 
@@ -34,124 +26,223 @@ With the project dependencies installed, run from `segagent-research-v2/`:
 python evals/run_evals.py --dataset evals/golden_cases.jsonl
 ```
 
-The command prints a JSON report with aggregate scores and per-fixture details.
-It accepts an alternative JSONL dataset through `--dataset`. The command shown
-here is an instruction, not a claim that an evaluation has been executed.
+The runner prints a JSON report containing aggregate scores and fixture details:
 
-### Reported metrics and limitations
-
-| JSON field | Definition | Bundled fixture coverage |
+| JSON field | Definition | Bundled coverage |
 | --- | --- | --- |
 | `first_action_accuracy` | Fraction of all fixtures whose first action matches the expected action. | 6 fixtures. |
-| `second_action_accuracy` | Fraction of fixtures declaring an expected second action whose second action matches. A missing second decision is incorrect. | 2 protocol fixtures. |
+| `second_action_accuracy` | Fraction of fixtures declaring an expected second action whose second action matches; a missing second decision is incorrect. | 2 protocol fixtures. |
 | `protocol_site_accuracy` | Fraction of fixtures declaring an expected site whose lookup returns that site. | 2 protocol fixtures. |
-| `mean_structure_recall` | Mean per-fixture recall of case-insensitive expected structure sets, using the second decision when present and otherwise the first. Only fixtures with nonempty expected sets contribute. | 4 structure fixtures. |
+| `mean_structure_recall` | Mean per-fixture recall of case-insensitive expected structure sets, using the second decision when present and otherwise the first. | 4 fixtures with nonempty expected sets. |
 | `abstention_accuracy` | Fraction of all fixtures for which the first action being `ask_user` agrees with `expect_abstention`. | 6 fixtures, including 1 expected abstention. |
 
-These are checks of a small, hand-authored routing fixture set. They are not
-held-out model benchmarks. Structure recall does not penalize extra predicted
-structures, and abstention accuracy is not abstention precision or recall.
-First- and second-action agreement does not measure a complete trajectory.
+This runner loads neither Qwen nor VoxTell, reads no image volumes, and invokes
+neither segmentation nor QC. A predicted `segment` or `run_qc` action is a
+routing decision, not a completed tool call. The runner also does not exercise
+the dialogue workflow, clarification gates, final-answer verifier, or recovery.
 
-The report does not measure invalid model decisions, image understanding,
-citation correctness, final-answer support, mask overlap, clinical utility,
-latency, reviewer behavior, or recovery after interruption. If a replacement
-dataset has no eligible fixtures for a conditional metric, the script's guarded
-division returns zero; report the eligible count and mark that metric as
-unassessed rather than interpreting the zero as measured performance.
+These six hand-authored fixtures are a regression aid, not a held-out benchmark.
+Structure recall does not penalize extra structures; abstention accuracy is
+not abstention precision or recall. If an alternative dataset has no eligible
+fixtures for a conditional metric, the guarded division returns zero. Report
+the eligible count and mark that metric unassessed.
 
-## Research questions for future experiments
+The runtime service supplies an embedding function to its knowledge base,
+including when `SEGAGENT_PLANNER=rule`. The fixture runner's lexical retrieval
+configuration does not characterize all rule-planner runtime requests.
 
-The following questions are proposed research directions, not conclusions:
+### Multimodal planner model matrix
 
-1. Does typed planning reduce invalid decisions and unsupported tool requests
-   compared with a free-form planner under matched model and tool conditions?
-2. Does protocol retrieval improve treatment-site selection, requested-structure
-   coverage, and source attribution on held-out requests?
-3. Does durable state preserve case isolation and correct execution when a run
-   is interrupted, reviewed, and resumed?
-4. How does human review affect mask acceptance, reviewer effort, and the use of
-   rejected artifacts in subsequent answers?
-5. Does an expert-mask cross-check improve contour-error detection relative to
-   deterministic QC alone, and what false-alert burden does it introduce?
+[`evals/run_model_matrix.py`](evals/run_model_matrix.py) invokes
+`QwenStructuredPlanner` with image views and local case artifacts. Its default
+matrix contains four configurations:
 
-## Proposed comparisons and ablations
+| Planner checkpoint | Thinking requested |
+| --- | --- |
+| `Qwen/Qwen3.5-9B` | Enabled |
+| `Qwen/Qwen3.5-9B` | Disabled |
+| `Qwen/Qwen3.5-27B` | Enabled |
+| `Qwen/Qwen3.5-27B` | Disabled |
 
-None of the comparisons below has a result reported in this document. Existing
-runtime settings provide some conditions, but the fixture runner does not
-implement a multi-system benchmark.
+The models are evaluation conditions, not separate application versions.
+Qwen3.5-9B is the runtime default; the 27B checkpoint is an evaluation candidate.
 
-| Proposed condition | Current support | Work required for a controlled comparison |
+The runner requires an existing, appropriately de-identified case in the local
+research store. Each JSONL row may specify `case_id`; `--case-id` supplies the
+fallback for rows without one. Replace the example ID below with a real stored
+case ID before running:
+
+```bash
+python evals/run_model_matrix.py \
+  --dataset evals/golden_cases.jsonl \
+  --data-dir .research_data \
+  --case-id case_REPLACE_WITH_STORED_ID \
+  --thinking both \
+  --output .research_data/model-matrix.json
+```
+
+The runner prints JSON and optionally writes the same payload through
+`--output`. The parent directory of that output file must already exist. Reusing one image
+for every bundled text fixture is useful for an execution check, but does not
+create a representative image benchmark. For meaningful evaluation, author
+case-specific questions and labels, then freeze a held-out split.
+
+The matrix reports:
+
+- `valid_decision_rate`: first planner calls returning a validated decision
+  divided by all rows. The planner may repair an invalid response once, so this
+  is not raw first-generation schema validity.
+- `first_action_accuracy` and `second_action_accuracy`: action agreement with
+  fixture labels. For rows declaring a second action, the runner supplies a
+  protocol observation and requests a second decision regardless of the first
+  action. This is a controlled follow-up, not a complete autonomous trajectory.
+- `mean_structure_recall`: mean recall over rows whose expected structure sets
+  reach the scoring step. Failed rows can be absent from this mean; review
+  per-row errors and report the intended and scored counts.
+- `thinking_presence_rate` and `mean_thinking_chars`: availability and length
+  of the first decision's captured thinking. Presence or length does not
+  establish reasoning correctness, usefulness, or clinical evidence.
+- `mean_latency_ms` and `p95_latency_ms`: elapsed time for successful first
+  planner calls. The first call includes lazy model loading; retries and image
+  preparation also contribute. These are not warmed generation-only or
+  end-to-end workflow timings.
+
+Inspect `details` when interpreting aggregates. A first call can count toward
+`valid_decision_rate` even if its second call later fails; the row detail then
+records the exception. The second-action denominator includes only rows that
+reached that stage after a successful first call. Small-sample percentile
+estimates and conditional averages should not be treated as broad performance
+claims.
+
+Both runners use lexical protocol lookup without embeddings. The model matrix
+does not execute VoxTell, score masks, measure QC accuracy, exercise multi-turn
+workflow recovery, or verify final-answer grounding. It constructs planners
+directly; it does not apply every runtime `Settings` option or reproduce the
+runtime's intent-gating path. Record its explicit CLI arguments and planner
+defaults, especially image budget, device placement, and token budget. Thinking
+can consume the generation budget before JSON, and the planner's repair attempt
+disables thinking; record this behavior when comparing conditions.
+
+The commands above describe evaluation entry points. Their presence does not
+claim that they have been executed or that any configuration has passed.
+
+## Runtime evidence and QC measurements
+
+The v3 runtime already produces structured evidence, but neither runner above
+constitutes a benchmark of that evidence pipeline:
+
+- `MetricEvidence` carries the measured quantity, unit, structure, source, and
+  artifact references. QC/report evidence is used by the deterministic final
+  answer verifier to check numeric claims and citations. Heuristic verification
+  is not a guarantee that every factual claim is correct.
+- Contour QC compares recognized organ/OAR contours with VoxTell masks. Where
+  available, it records Dice, contour/model volumes, volume difference, mean
+  surface distance, and HD95, together with comparison artifacts. These are
+  agreement measurements against a model prediction, not accuracy against an
+  independent reference annotation.
+- Targets such as GTV, CTV, and PTV receive descriptive measurements rather than
+  anatomy-model correctness judgments. Auxiliary and unclassified structures
+  have separate handling. Evaluate role classification and exclusions explicitly.
+- Protocol completeness depends on applicability checks. An unassessed protocol
+  cannot support a claim that required anatomy is missing.
+- Mask-aware follow-up answers, artifact references, prompt normalization,
+  dialogue continuity, clarification gates, and finalization guards have code
+  and test coverage. Their presence does not replace measured model or workflow
+  performance on representative cases.
+
+Use independent reference annotations and a documented scoring protocol before
+reporting segmentation or contour-QC accuracy. Keep the distinction between
+model agreement, deterministic checks, and expert adjudication in all results.
+
+## Proposed research questions and comparisons
+
+The following are research questions, not reported findings:
+
+1. How do the 9B and 27B planners compare under matched inputs, token budgets,
+   and thinking settings, including schema-repair and failure behavior?
+2. Does typed planning reduce invalid tool requests compared with a matched
+   free-form planner?
+3. Does protocol retrieval improve requested-structure selection and source
+   attribution on held-out questions?
+4. Does mask context improve case-bound follow-up answers and artifact-reference
+   resolution without increasing unsupported claims?
+5. Does expert-mask comparison improve contour-error detection relative to
+   deterministic QC alone, and at what false-alert burden?
+6. Do clarification gates and durable dialogue preserve correct execution across
+   interrupted streams, process restarts, and ambiguous follow-up requests?
+
+| Proposed condition | Existing support | Additional evaluation work |
 | --- | --- | --- |
-| Rule versus Qwen planning | Runtime selection through `SEGAGENT_PLANNER=rule` or `qwen`. | Add an evaluation adapter for Qwen and matched observations; the existing runner evaluates only rules. |
-| Legacy versus v2 workflow | Both implementations are present in separate directories. | Define shared cases, equivalent tool/model settings, supported tasks, and output scoring. Do not assume feature parity. |
-| Lexical versus hybrid retrieval | The fixture runner disables embeddings; the runtime service supplies an embedding function. | Add an explicit comparison harness with fixed knowledge snapshots and matched planner conditions. |
-| Retrieval disabled | No dedicated no-RAG runtime switch. | Implement an isolated ablation and define how the planner behaves without retrieved protocols or passages. |
-| Human review enabled versus disabled | `SEGAGENT_REQUIRE_MASK_APPROVAL=true` or `false` controls the runtime segmentation review step. | Add workflow-level evaluation and reviewer labels. The disabled condition automatically approves that step; record it as an experimental configuration. |
-| Deterministic QC versus expert-mask cross-check | No dedicated no-expert runtime switch. | Implement a controlled QC ablation and score it against independently annotated contour issues. |
-| Durable resume versus fresh execution | Checkpointed workflow code is present. | Add interruption and recovery scenarios, instrumentation, and assertions on state and artifacts. |
+| Qwen 9B/27B, thinking enabled/disabled | Implemented four-cell planner runner. | Add representative case-specific labels, failure-aware scoring, and controlled resource measurements. |
+| Rule versus Qwen planning | Runtime `SEGAGENT_PLANNER=rule` or `qwen`; separate runners. | Match inputs, observations, retrieval, and scoring before comparing their reports. |
+| Lexical versus hybrid retrieval | Lexical runners and embedding-backed runtime knowledge base. | Add one matched retrieval harness with a frozen knowledge snapshot. |
+| Retrieval disabled | No dedicated no-RAG runtime switch. | Implement an isolated ablation and specify planner behavior without retrieved knowledge. |
+| Mask context disabled | No dedicated no-mask-context ablation switch. | Control selected artifact views and references without changing other planner inputs. |
+| Deterministic QC without expert comparison | No dedicated no-expert runtime switch. | Isolate the comparison component and use independent issue annotations. |
+| Interrupted versus uninterrupted execution | Checkpointed dialogue and clarification gates. | Add interruption schedules, restart scenarios, state assertions, and event auditing. |
 
-An ablation should vary one intended factor while holding models, knowledge,
-inputs, tool availability, and scoring fixed. Document code changes needed to
-create each condition instead of presenting proposed conditions as available
-configuration flags.
+The current v3 configuration has no `SEGAGENT_REQUIRE_MASK_APPROVAL` setting.
+Its clarification gates should not be described as the earlier blanket mask
+approval step. Any future human-review study must define its intervention and
+implementation before evaluation.
 
-## Proposed image and workflow evaluation
+For each ablation, vary one intended factor and document the required patch.
+Do not present proposed conditions as ready-made configuration flags.
 
-These measurements require additional data and harnesses; they are not outputs
-of `run_evals.py`:
+## Proposed image and workflow benchmark
 
-- **Segmentation:** Dice, surface Dice with a declared tolerance, HD95 in physical
-  units, volume error, and empty-mask or tool-failure rates. Define behavior for
-  absent structures and empty reference or predicted masks before scoring.
-- **Retrieval and answers:** protocol-site accuracy, structure precision and
-  recall, citation correctness, and unsupported-claim rate, using independent
-  labels and a written adjudication rubric.
+Additional datasets and instrumentation are needed for these measurements:
+
+- **Segmentation:** Dice, surface Dice with a declared tolerance, HD95 in
+  physical units, volume error, and empty-mask or tool-failure rates against
+  independent references. Predefine absent-structure and empty-mask handling.
+- **Answers and retrieval:** structure precision and recall, citation correctness,
+  unsupported-claim rate, and artifact-reference accuracy with an independent
+  annotation and adjudication rubric.
 - **Contour QC:** issue-level precision and recall, false alerts per case,
-  agreement with expert annotations, and reviewer time. Keep reference labels
-  independent of the model used for expert-mask comparison.
-- **Planning:** complete-trajectory success, invalid-decision rate, clarification
-  precision and recall, tool failures, and steps to completion.
-- **Reliability and resources:** resume success, duplicate tool execution,
-  approval handling, cross-case artifact isolation, event completeness,
-  latency, peak GPU memory, and compute cost per completed case.
+  expert agreement, and reviewer effort. Reference labels must be independent
+  of the model used for comparison.
+- **Thinking visibility:** stream completeness, truncation, time to first
+  displayed token, and human-rated usefulness. Raw thinking is not admitted
+  measurement evidence.
+- **Workflow reliability:** task completion, duplicate tool calls, clarification
+  handling, cross-case isolation, stale artifact references, event completeness,
+  and resume success.
+- **Resources:** warm and cold latency, peak memory, tool runtime, and compute
+  cost per completed case, with failed cases retained in the accounting.
 
-Before computing segmentation metrics, verify orientation, affine transforms,
-voxel spacing, dimensions, label mapping, and any resampling. Use the same
-geometry policy across conditions and retain its provenance. Report per-case
-and per-structure results, denominators, failures, and exclusions; aggregate
-means alone can hide important failure modes.
+Before scoring masks, verify orientation, affine transforms, voxel spacing,
+dimensions, labels, and resampling. Use the same geometry policy across
+conditions and preserve its provenance. Report case- and structure-level
+denominators, failures, and exclusions alongside aggregate scores.
 
-## Reproducibility and reporting protocol
+## Reproducibility and reporting
 
-1. **Freeze the experiment.** Record the repository commit, configuration,
-   dependency versions, exact command, and any uncommitted experimental patch.
-   Identify the planner, segmentation model, text encoder, and knowledge sources
-   by immutable revision or checksum where available.
-2. **Define the dataset.** Record dataset version, provenance, inclusion criteria,
-   labels, train/development/test split, and any failure-focused subset. Split
-   by patient or another justified independent unit to avoid leakage. Keep
-   development fixtures separate from claims of held-out generalization.
-3. **Control execution.** Record random seeds, decoding and sampling settings,
-   hardware, OS, Python, GPU driver/CUDA, precision, and relevant environment
-   settings. Document nondeterminism and repeated-run policy; a fixed seed alone
-   does not guarantee identical model behavior.
-4. **Predefine scoring.** Specify metric implementations, units, tolerances,
-   eligibility rules, missing-value handling, aggregation, and annotation
-   procedure. Report uncertainty only with an appropriate sample and method;
-   the six bundled fixtures do not support broad performance claims.
-5. **Audit recovery and review.** Test interruption before and after tool calls,
-   while awaiting approval, and across process restart. Check that resumption
-   uses the intended case/run, preserves artifact references, handles duplicate
-   requests, and records approve, reject, and feedback decisions correctly.
-   Investigate unintended approval bypasses and cross-case access separately
-   from ordinary task failures.
-6. **Publish evidence and limits.** Include aggregate scores, denominators,
-   failure categories, resource measurements, and the exact experimental
-   conditions. Release only appropriately licensed, synthetic or de-identified
-   artifacts. Do not publish protected health information, credentials, private
-   traces, or downloaded weights without redistribution rights.
+1. **Freeze the experiment.** Record the repository commit, any experimental
+   patch, dependency versions, configuration, and exact command. Identify planner,
+   segmentation model, text encoder, and knowledge sources by immutable revision
+   or checksum. Local snapshot paths may be needed to pin model revisions.
+2. **Define the dataset.** Record provenance, inclusion criteria, annotation
+   procedure, dataset version, splits, and a separate failure-focused subset.
+   Split by patient or another justified independent unit to prevent leakage.
+   Keep development fixtures separate from held-out claims.
+3. **Control execution.** Record random seeds, deterministic decoding settings,
+   hardware, OS, Python, GPU driver/CUDA, precision, device placement, image
+   budget, and generation limits. Document nondeterminism and repeated-run
+   policy; a fixed seed alone does not guarantee identical model behavior.
+4. **Predefine scoring.** Specify implementations, units, tolerances, aggregation,
+   eligibility, missing-value handling, and uncertainty methods. Report intended
+   and successfully scored counts. Six fixtures cannot establish general model
+   performance.
+5. **Audit recovery.** Interrupt before and after tool execution, during a
+   clarification gate, and across process restart. Verify case/run identity,
+   conversation state, artifact provenance, duplicate-request handling, and
+   reference resolution. Audit cross-case access and unsupported final claims.
+6. **Publish evidence and limits.** Include aggregate scores, failure categories,
+   resource measurements, and exact conditions. Release only appropriately
+   licensed, synthetic or de-identified artifacts. Exclude PHI, credentials,
+   private traces, and weights without redistribution permission.
 
-Report measured findings only after completing the corresponding experiment.
-Describe unimplemented conditions as proposals, and do not infer clinical
-validation from routing fixtures, unit tests, or model agreement.
+Report improvements only after running the corresponding experiment. Routing
+fixtures, unit tests, model agreement, and verifier acceptance do not establish
+clinical validity.

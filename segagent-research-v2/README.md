@@ -1,30 +1,32 @@
-# SegAgent Research v2
+# SegAgent Research v3
 
-The standalone research application for language-guided 3D segmentation and contour QC: FastAPI, React/NiiVue, a Qwen2.5-VL planner, VoxTell tools, and a checkpointed LangGraph workflow.
+This directory contains the **final, canonical SegAgent implementation**, merged from the `segagent-research-v3` development branch into `main`.
 
-![Research v2 architecture](../docs/assets/architecture.svg)
+The directory name `segagent-research-v2/` is retained for path compatibility. It is a historical name, not a separate supported version.
 
-Start with the [project overview](../README.md) or [简体中文介绍](../README.zh-CN.md). Setup and implementation documentation live in one place:
+![Research v3 architecture](../docs/assets/architecture.svg)
+
+Start with the [project overview](../README.md) or [简体中文介绍](../README.zh-CN.md).
 
 | Document | Purpose |
 | --- | --- |
-| [Getting started](../docs/getting-started.md) | Requirements, model weights, backend, frontend, and first case |
-| [Architecture](../docs/architecture.md) | Planning, tools, review, persistence, HTTP, MCP, and A2A |
-| [Configuration](../docs/configuration.md) | Environment variables and defaults |
-| [Experiments](EXPERIMENTS.md) | Evaluation design and reporting protocol |
-| [Contributing](../CONTRIBUTING.md) | Development and contribution workflow |
-| [Security](../SECURITY.md) | Research use and sensitive-data handling |
+| [Getting started](../docs/getting-started.md) | Dependencies, weights, backend, frontend, and first conversation |
+| [Architecture](../docs/architecture.md) | Persistent dialogue, Qwen3.5, VoxTell, QC, evidence, and integrations |
+| [Configuration](../docs/configuration.md) | Device placement, input limits, batching, and storage |
+| [Experiments](EXPERIMENTS.md) | Existing runners and proposed studies |
+| [Contributing](../CONTRIBUTING.md) | Development workflow |
+| [Security](../SECURITY.md) | Sensitive-data handling and research boundaries |
 
 ## Source layout
 
 ```text
-backend/      Typed contracts, model adapters, tools, graph, storage, and API
-frontend/     Case viewer, run events, and segmentation review
-knowledge/    Research seed protocols, reference volumes, and guideline directory
-evals/        Text-only rule-planner fixtures and runner
-tests/        Deterministic schema, planner, retrieval, and storage tests
+backend/      Intent, dialogue, planner, tools, QC, evidence, storage, and API
+frontend/     Case conversation, live model output, and NiiVue viewer
+knowledge/    Research seed protocols and optional guideline documents
+evals/        Rule fixtures and Qwen3.5 model-matrix evaluation
+tests/        Deterministic unit and contract tests
 ```
 
-Run backend and evaluation commands from this directory so relative `.env` and dataset paths resolve correctly. Frontend commands run from `frontend/`.
+Run backend and evaluation commands from this directory. Frontend commands run from `frontend/`. VoxTell code and model weights are external dependencies.
 
-VoxTell code and weights are external dependencies. The example configuration selects the rule baseline; actual segmentation still requires VoxTell. This is research software, with no clinical validation or production security claim.
+The default planner is `Qwen/Qwen3.5-9B` with thinking enabled. Masks appear without a blocking approval gate; clarification questions continue through the case conversation. Model thinking and mask comparisons do not replace clinical evidence or expert review.

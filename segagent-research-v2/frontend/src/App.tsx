@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import {
   AlertTriangle,
   BrainCircuit,
@@ -10,25 +10,25 @@ import {
   FlaskConical,
   Loader2,
   MessageSquareText,
+  Pencil,
   ScanLine,
-  ShieldCheck,
-  Sparkles,
+  SendHorizonal,
   X,
 } from 'lucide-react';
 import {
   addContours,
-  approvalFromEvent,
   caseImageUrl,
   createCase,
   getCase,
+  getConversation,
   getRun,
-  resumeRun,
-  startRun,
+  sendMessage,
+  uploadEditedMask,
 } from './api';
 import MedicalViewer from './components/MedicalViewer';
-import TracePanel from './components/TracePanel';
+import ChatThread from './components/ChatThread';
 import UploadField from './components/UploadField';
-import type { ApprovalRequest, ArtifactRef, CaseRecord, RunEvent, ViewerMask } from './types';
+import type { ArtifactRef, CaseRecord, ChatMessage, RunEvent, ViewerMask } from './types';
 
 const SAVED_CASE = 'segagent.activeCaseId';
 const SAVED_RUN = 'segagent.activeRunId';
@@ -49,9 +49,9 @@ type BusyState =
   | 'uploading-image'
   | 'uploading-contours'
   | 'running'
-  | 'reviewing';
+  | 'editing';
 
-type StreamOutcome = 'unknown' | 'approval' | 'completed' | 'failed';
+type StreamOutcome = 'unknown' | 'completed' | 'failed';
 
 function isNifti(file: File): boolean {
   const name = file.name.toLowerCase();
@@ -97,30 +97,34 @@ function masksFromCase(record: CaseRecord): ViewerMask[] {
     .map(viewerMask);
 }
 
+// A tumor-target (GTV) mask is never treated as validated: the agent segments
+// what was described, it does not confirm disease, so these are flagged for
+// mandatory clinician review rather than shown as final.
+function isTargetMask(mask: ViewerMask): boolean {
+  return mask.metadata?.target_type === 'gtv';
+}
+
+function targetTypeOf(mask: ViewerMask): string {
+  return typeof mask.metadata?.target_type === 'string' ? mask.metadata.target_type : 'unknown';
+}
+
 export default function App() {
   const [caseRecord, setCaseRecord] = useState<CaseRecord | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [history, setHistory] = useState<ChatMessage[]>([]);
+  const [awaitingReply, setAwaitingReply] = useState(false);
   const [masks, setMasks] = useState<ViewerMask[]>([]);
   const [question, setQuestion] = useState('');
   const [runId, setRunId] = useState('');
-  const [approval, setApproval] = useState<ApprovalRequest | null>(null);
-  const [reviewFeedback, setReviewFeedback] = useState('');
   const [busy, setBusy] = useState<BusyState>(() => readSaved(SAVED_CASE) ? 'restoring' : 'idle');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [viewerReady, setViewerReady] = useState(false);
   const activeCaseId = useRef('');
   const requestController = useRef<AbortController | null>(null);
-  const reviewRef = useRef<HTMLElement>(null);
-
-  const answer = useMemo(
-    () => [...events].reverse().find(event => event.type === 'answer')?.payload.text,
-    [events],
-  );
-  const requiredMaskIds = useMemo(
-    () => approval?.artifacts?.map(artifact => artifact.artifact_id) || [],
-    [approval],
-  );
+  const sendController = useRef<AbortController | null>(null);
+  const editFileRef = useRef<HTMLInputElement>(null);
+  const editTarget = useRef<ViewerMask | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -133,24 +137,54 @@ export default function App() {
         setCaseRecord(restoredCase);
         setMasks(masksFromCase(restoredCase));
 
-        const savedRunId = readSaved(SAVED_RUN);
-        if (savedRunId) {
-          try {
-            const history = await getRun(savedRunId, controller.signal);
-            if (history.run.case_id === restoredCase.case_id) {
-              setRunId(history.run.run_id);
-              setEvents(history.events);
-              if (history.run.status === 'waiting_approval') {
-                const pending = [...history.events]
-                  .reverse()
-                  .find(event => event.type === 'approval_required');
-                if (pending) setApproval(approvalFromEvent(pending));
-              }
-            } else {
-              forget(SAVED_RUN);
+        const conversationRunIds: string[] = [];
+        let conversationPendingRunId: string | null = null;
+        let conversationLoaded = false;
+        try {
+          const conversation = await getConversation(restoredCase.case_id, controller.signal);
+          setHistory(conversation.messages);
+          conversationPendingRunId = conversation.conversation.pending_run_id || null;
+          setAwaitingReply(Boolean(conversationPendingRunId));
+          conversationLoaded = true;
+          for (const message of conversation.messages) {
+            if (message.run_id && !conversationRunIds.includes(message.run_id)) {
+              conversationRunIds.push(message.run_id);
             }
-          } catch (caught) {
-            if (isAbortError(caught)) throw caught;
+          }
+          if (
+            conversationPendingRunId
+            && !conversationRunIds.includes(conversationPendingRunId)
+          ) {
+            conversationRunIds.push(conversationPendingRunId);
+          }
+        } catch (caught) {
+          if (isAbortError(caught)) throw caught;
+        }
+
+        const savedRunId = readSaved(SAVED_RUN);
+        if (savedRunId && !conversationRunIds.includes(savedRunId)) {
+          conversationRunIds.push(savedRunId);
+        }
+        if (conversationRunIds.length) {
+          const histories = await Promise.allSettled(
+            conversationRunIds.map(id => getRun(id, controller.signal)),
+          );
+          if (controller.signal.aborted) return;
+          const available = histories.flatMap(result =>
+            result.status === 'fulfilled' && result.value.run.case_id === restoredCase.case_id
+              ? [result.value]
+              : [],
+          );
+          setEvents(available.flatMap(item => item.events));
+
+          const active = available.find(item => item.run.run_id === savedRunId)
+            || available.find(item => item.run.run_id === conversationPendingRunId)
+            || available[available.length - 1];
+          if (active) {
+            setRunId(active.run.run_id);
+            if (!conversationLoaded) setAwaitingReply(active.run.status === 'waiting_reply');
+          }
+          if (savedRunId && !available.some(item => item.run.run_id === savedRunId)) {
             forget(SAVED_RUN);
           }
         }
@@ -169,11 +203,14 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    if (approval) reviewRef.current?.focus();
-  }, [approval]);
-
-  useEffect(() => () => requestController.current?.abort(), []);
+  useEffect(() => () => {
+    const activeRequest = requestController.current;
+    const activeSend = sendController.current;
+    requestController.current = null;
+    sendController.current = null;
+    activeSend?.abort();
+    if (activeRequest !== activeSend) activeRequest?.abort();
+  }, []);
 
   const addArtifact = (artifact: ArtifactRef) => {
     if (artifact.case_id !== activeCaseId.current) return;
@@ -191,12 +228,8 @@ export default function App() {
       return [...previous, event];
     });
     if (event.type === 'artifact' && event.payload.artifact) addArtifact(event.payload.artifact);
-    if (event.type === 'approval_required') {
-      const request = approvalFromEvent(event);
-      setViewerReady(false);
-      request.artifacts?.forEach(addArtifact);
-      setApproval(request);
-    }
+    if (event.type === 'question_pending') setAwaitingReply(true);
+    if (event.type === 'reply_recorded') setAwaitingReply(false);
     if (event.type === 'error') setError(event.payload.message || 'The run failed.');
   };
 
@@ -204,9 +237,9 @@ export default function App() {
     activeCaseId.current = created.case_id;
     setCaseRecord(created);
     setEvents([]);
+    setHistory([]);
+    setAwaitingReply(false);
     setRunId('');
-    setApproval(null);
-    setReviewFeedback('');
     setQuestion('');
     setViewerReady(false);
     setMasks(masksFromCase(created));
@@ -216,7 +249,7 @@ export default function App() {
 
   const uploadImage = async (files: File[]) => {
     const file = files[0];
-    if (!file || busy !== 'idle') return;
+    if (!file || busy !== 'idle' || requestController.current) return;
     if (!isNifti(file)) {
       setError('Choose a NIfTI file ending in .nii or .nii.gz.');
       return;
@@ -236,13 +269,15 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      setBusy('idle');
+      if (requestController.current === controller) {
+        requestController.current = null;
+        setBusy('idle');
+      }
     }
   };
 
   const uploadContours = async (files: File[]) => {
-    if (!caseRecord || !files.length || busy !== 'idle') return;
+    if (!caseRecord || !files.length || busy !== 'idle' || requestController.current) return;
     const invalid = files.find(file => !isNifti(file));
     if (invalid) {
       setError(`${invalid.name} is not a .nii or .nii.gz file.`);
@@ -274,33 +309,44 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      setBusy('idle');
+      if (requestController.current === controller) {
+        requestController.current = null;
+        setBusy('idle');
+      }
     }
   };
 
-  const run = async () => {
-    if (!caseRecord || !viewerReady || !question.trim() || busy !== 'idle' || approval) return;
+  // One send action: the server continues a pending question or opens a new
+  // turn, so the composer behaves like an ordinary chat box.
+  const send = async () => {
+    if (
+      sendController.current
+      || requestController.current
+      || !caseRecord
+      || !viewerReady
+      || !question.trim()
+      || busy !== 'idle'
+    ) return;
     const expectedCaseId = caseRecord.case_id;
+    const text = question.trim();
     const controller = new AbortController();
+    // This ref is the synchronous single-flight lock. Unlike React state, it is
+    // visible to a second invocation before the next render commits.
+    sendController.current = controller;
     requestController.current = controller;
     setBusy('running');
-    setEvents([]);
-    setApproval(null);
-    setRunId('');
+    setQuestion('');
     setError('');
-    setNotice('Running…');
-    setMasks(previous => previous.map(mask => (
-      mask.kind === 'mask' ? { ...mask, visible: false } : mask
-    )));
-    forget(SAVED_RUN);
+    setNotice(awaitingReply ? 'Sending reply…' : 'Working…');
     const stream = { outcome: 'unknown' as StreamOutcome };
+    const visibleMaskIds = masks
+      .filter(mask => mask.visible)
+      .map(mask => mask.artifact_id);
     try {
-      await startRun(
+      await sendMessage(
         expectedCaseId,
-        question.trim(),
+        text,
         event => {
-          if (event.type === 'approval_required') stream.outcome = 'approval';
           if (event.type === 'run_completed') stream.outcome = 'completed';
           if (event.type === 'error') stream.outcome = 'failed';
           acceptEvent(event, expectedCaseId);
@@ -310,86 +356,100 @@ export default function App() {
           save(SAVED_RUN, id);
         },
         controller.signal,
+        {
+          visible_mask_ids: visibleMaskIds,
+          // Visibility is ambient viewer state, not an explicit reference.
+          // Keeping these separate prevents a 15–20-mask OAR view from being
+          // interpreted as though the user named every contour in the prompt.
+          referenced_artifact_ids: [],
+        },
       );
-      if (stream.outcome === 'approval') setNotice('Review the new masks.');
-      else if (stream.outcome === 'completed') setNotice('Run complete.');
+      if (stream.outcome === 'completed') setNotice('Done.');
       else if (stream.outcome === 'failed') setNotice('');
-      else setNotice('Run paused.');
+      else setNotice('');
     } catch (caught) {
       if (!isAbortError(caught)) {
         setNotice('');
+        setQuestion(text);  // keep the text so the message is not lost
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      setBusy('idle');
+      // A superseded request must never clear a newer request's controller or
+      // unlock its UI state.
+      if (
+        sendController.current === controller
+        && requestController.current === controller
+      ) {
+        sendController.current = null;
+        requestController.current = null;
+        setBusy('idle');
+      }
     }
   };
 
-  const review = async (decision: 'approve' | 'reject' | 'feedback') => {
-    if (!runId || !caseRecord || busy !== 'idle' || !approval) return;
-    if (decision === 'feedback' && !reviewFeedback.trim()) return;
-    const currentApproval = approval;
+  const startEdit = (mask: ViewerMask) => {
+    if (busy !== 'idle') return;
+    editTarget.current = mask;
+    editFileRef.current?.click();
+  };
+
+  // On-demand edit: the user corrects a contour (e.g. drawn/exported from a
+  // viewer) and uploads it. It is registered as a new mask on the same grid —
+  // no run pause, no approval gate.
+  const uploadEdit = async (file: File) => {
+    const target = editTarget.current;
+    if (!caseRecord || !target || busy !== 'idle' || requestController.current) return;
+    if (!isNifti(file)) {
+      setError('The edited contour must be a .nii or .nii.gz file.');
+      return;
+    }
     const expectedCaseId = caseRecord.case_id;
     const controller = new AbortController();
     requestController.current = controller;
-    setBusy('reviewing');
-    setApproval(null);
+    setBusy('editing');
     setError('');
-    setNotice('Saving review…');
-    const stream: { outcome: StreamOutcome; approval: ApprovalRequest | null } = {
-      outcome: 'unknown',
-      approval: null,
-    };
+    setNotice(`Uploading edited ${target.label}…`);
     try {
-      await resumeRun(
-        runId,
-        decision,
-        reviewFeedback.trim(),
-        event => {
-          if (event.type === 'approval_required') {
-            stream.outcome = 'approval';
-            stream.approval = approvalFromEvent(event);
-          }
-          if (event.type === 'run_completed') stream.outcome = 'completed';
-          if (event.type === 'error') stream.outcome = 'failed';
-          acceptEvent(event, expectedCaseId);
-        },
+      const ref = await uploadEditedMask(
+        expectedCaseId,
+        target.label,
+        file,
+        target.artifact_id,
+        targetTypeOf(target),
         controller.signal,
       );
-      setReviewFeedback('');
-      if (stream.outcome === 'approval') setNotice('More masks need review.');
-      else if (stream.outcome === 'completed') setNotice('Run complete.');
-      else if (stream.outcome === 'failed') setNotice('');
-      else setNotice('Review saved.');
+      if (activeCaseId.current !== expectedCaseId) return;
+      addArtifact(ref);
+      setNotice(`Edited ${target.label} added to the viewer.`);
     } catch (caught) {
       if (!isAbortError(caught)) {
         setNotice('');
-        setApproval(stream.approval || currentApproval);
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      requestController.current = null;
-      setBusy('idle');
+      if (requestController.current === controller) {
+        requestController.current = null;
+        editTarget.current = null;
+        setBusy('idle');
+      }
     }
   };
 
   const onQuestionKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+    // Enter sends; Shift+Enter inserts a newline.
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      void run();
+      void send();
     }
   };
 
   const toggleMask = (artifactId: string) => {
-    if (requiredMaskIds.includes(artifactId)) setViewerReady(false);
     setMasks(items => items.map(item => (
       item.artifact_id === artifactId ? { ...item, visible: !item.visible } : item
     )));
   };
 
   const setAllMasks = (visible: boolean) => {
-    if (requiredMaskIds.length) setViewerReady(false);
     setMasks(items => items.map(item => ({ ...item, visible })));
   };
 
@@ -404,10 +464,6 @@ export default function App() {
   };
 
   const locked = busy !== 'idle';
-  const reviewActions: ReadonlyArray<'approve' | 'feedback' | 'reject'> = approval?.allowed_decisions?.length
-    ? approval.allowed_decisions
-    : ['approve', 'feedback', 'reject'];
-  const reviewMasks = approval?.artifacts || [];
 
   return (
     <div className="app-shell">
@@ -430,7 +486,7 @@ export default function App() {
             hint="NIfTI file · .nii or .nii.gz"
             value={caseRecord?.source_name}
             icon={ScanLine}
-            disabled={locked || Boolean(approval)}
+            disabled={locked}
             busy={busy === 'uploading-image'}
             onFiles={uploadImage}
           />
@@ -444,7 +500,7 @@ export default function App() {
             actionLabel="Add"
             icon={FileCheck2}
             multiple
-            disabled={!caseRecord || locked || Boolean(approval)}
+            disabled={!caseRecord || locked}
             busy={busy === 'uploading-contours'}
             onFiles={uploadContours}
           />
@@ -459,8 +515,8 @@ export default function App() {
         {caseRecord && (
           <section className="case-card" aria-label="Current case">
             <div className="case-card-title">
-              <span className={`ready-dot${approval ? ' needs-review' : ''}`} />
-              <strong>{approval ? 'Review needed' : locked ? 'Working' : !viewerReady ? 'Loading scan' : 'Ready'}</strong>
+              <span className="ready-dot" />
+              <strong>{locked ? 'Working' : !viewerReady ? 'Loading scan' : 'Ready'}</strong>
             </div>
             <dl>
               <div><dt>Scan</dt><dd>{caseRecord.source_name}</dd></div>
@@ -484,20 +540,48 @@ export default function App() {
             </div>
             <div className="mask-items">
               {masks.map(mask => (
-                <button
-                  type="button"
-                  className="mask-item"
-                  key={mask.artifact_id}
-                  onClick={() => toggleMask(mask.artifact_id)}
-                  aria-pressed={mask.visible}
-                  title={`${mask.visible ? 'Hide' : 'Show'} ${mask.label}`}
-                >
-                  <i style={{ backgroundColor: mask.visible ? mask.swatch : '#64748b' }} />
-                  <span><strong>{mask.label}</strong><small>{mask.kind === 'contour' ? 'Uploaded' : 'Generated'}</small></span>
-                  {mask.visible ? <Eye size={15} aria-hidden="true" /> : <EyeOff size={15} aria-hidden="true" />}
-                </button>
+                <div className="mask-row" key={mask.artifact_id}>
+                  <button
+                    type="button"
+                    className="mask-item"
+                    onClick={() => toggleMask(mask.artifact_id)}
+                    aria-pressed={mask.visible}
+                    title={`${mask.visible ? 'Hide' : 'Show'} ${mask.label}`}
+                  >
+                    <i style={{ backgroundColor: mask.visible ? mask.swatch : '#64748b' }} />
+                    <span>
+                      <strong>{mask.label}</strong>
+                      <small>{mask.kind === 'contour' ? 'Uploaded' : 'Generated'}</small>
+                    </span>
+                    {mask.visible ? <Eye size={15} aria-hidden="true" /> : <EyeOff size={15} aria-hidden="true" />}
+                  </button>
+                  {isTargetMask(mask) && (
+                    <span className="mask-badge" title="Tumor target — not validated; a clinician must review before clinical use">Review</span>
+                  )}
+                  <button
+                    type="button"
+                    className="mask-edit"
+                    onClick={() => startEdit(mask)}
+                    disabled={locked}
+                    title={`Upload an edited version of ${mask.label} (.nii/.nii.gz)`}
+                    aria-label={`Edit ${mask.label}`}
+                  >
+                    <Pencil size={14} aria-hidden="true" />
+                  </button>
+                </div>
               ))}
             </div>
+            <input
+              ref={editFileRef}
+              type="file"
+              accept=".nii,.nii.gz"
+              className="visually-hidden"
+              onChange={event => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (file) void uploadEdit(file);
+              }}
+            />
           </section>
         )}
       </aside>
@@ -507,105 +591,19 @@ export default function App() {
           key={caseRecord?.case_id || 'empty'}
           imageUrl={caseRecord ? caseImageUrl(caseRecord.case_id) : null}
           masks={masks}
-          requiredMaskIds={requiredMaskIds}
           onReadyChange={setViewerReady}
         />
       </main>
 
       <aside className="agent-panel" aria-labelledby="agent-heading">
-        <h2 className="panel-heading" id="agent-heading"><MessageSquareText size={18} aria-hidden="true" /> Ask SegAgent</h2>
+        <h2 className="panel-heading" id="agent-heading">
+          <MessageSquareText size={18} aria-hidden="true" /> SegAgent
+          {busy === 'running' && <span className="pulse-dot" aria-label="Working" />}
+        </h2>
 
-        <div className="prompt-suggestions" aria-label="Example requests">
-          <button type="button" disabled={!caseRecord || !viewerReady || locked || Boolean(approval)} onClick={() => setQuestion('Segment the liver.')}>Liver</button>
-          <button type="button" disabled={!caseRecord || !viewerReady || locked || Boolean(approval)} onClick={() => setQuestion('Segment the left kidney and right kidney.')}>Kidneys</button>
-          <button type="button" disabled={!caseRecord?.contours.length || !viewerReady || locked || Boolean(approval)} onClick={() => setQuestion('Check contours.')}>Check contours</button>
+        <div className="chat-scroll">
+          <ChatThread messages={history} events={events} busy={busy === 'running'} />
         </div>
-
-        <div className="composer">
-          <label htmlFor="agent-question">What should the agent do?</label>
-          <textarea
-            id="agent-question"
-            value={question}
-            onChange={event => setQuestion(event.target.value)}
-            onKeyDown={onQuestionKeyDown}
-            disabled={!caseRecord || !viewerReady || locked || Boolean(approval)}
-            placeholder={!caseRecord ? 'Upload a scan first' : !viewerReady ? 'Wait for the scan to load' : 'Example: Segment the liver'}
-          />
-          <div className="composer-footer">
-            <span>⌘/Ctrl + Enter</span>
-            <button
-              type="button"
-              className="primary run-button"
-              disabled={!caseRecord || !viewerReady || !question.trim() || locked || Boolean(approval)}
-              onClick={run}
-            >
-              {busy === 'running' ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
-              {busy === 'running' ? 'Running…' : 'Run'}
-            </button>
-          </div>
-        </div>
-
-        {approval && (
-          <section className="approval-card" ref={reviewRef} tabIndex={-1} aria-labelledby="review-heading">
-            <div className="approval-title">
-              <span><ShieldCheck size={19} aria-hidden="true" /></span>
-              <div><h3 id="review-heading">Review results</h3><p>{reviewMasks.length} new mask{reviewMasks.length === 1 ? '' : 's'} ready</p></div>
-            </div>
-            <p className="review-help">Check the masks in the viewer, then choose what to do.</p>
-            {!viewerReady && <p className="review-warning">Show every new mask and wait for it to load before approving.</p>}
-
-            {reviewMasks.length > 0 && (
-              <div className="review-mask-list">
-                {reviewMasks.map(artifact => {
-                  const mask = masks.find(item => item.artifact_id === artifact.artifact_id);
-                  return (
-                    <button type="button" key={artifact.artifact_id} onClick={() => toggleMask(artifact.artifact_id)} aria-pressed={mask?.visible ?? true}>
-                      <i style={{ backgroundColor: mask?.swatch || '#60a5fa' }} />
-                      <span>{artifact.label}</span>
-                      {mask?.visible === false ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            {approval.summary && (
-              <details className="review-details">
-                <summary>View measurements</summary>
-                <p>{approval.summary}</p>
-              </details>
-            )}
-
-            {reviewActions.includes('feedback') && (
-              <>
-                <label htmlFor="review-note">What should change?</label>
-                <textarea
-                  id="review-note"
-                  value={reviewFeedback}
-                  onChange={event => setReviewFeedback(event.target.value)}
-                  placeholder="Add a note to request changes"
-                />
-              </>
-            )}
-            <div className="review-actions">
-              {reviewActions.includes('approve') && (
-                <button type="button" className="approve" disabled={busy !== 'idle' || !viewerReady} onClick={() => review('approve')}><Check size={16} /> Approve</button>
-              )}
-              {reviewActions.includes('feedback') && (
-                <button type="button" className="feedback" disabled={busy !== 'idle' || !reviewFeedback.trim()} onClick={() => review('feedback')}><AlertTriangle size={16} /> Request changes</button>
-              )}
-              {reviewActions.includes('reject') && (
-                <button type="button" className="reject" disabled={busy !== 'idle'} onClick={() => review('reject')}><X size={16} /> Reject</button>
-              )}
-            </div>
-          </section>
-        )}
-
-        {busy === 'reviewing' && (
-          <div className="inline-progress" role="status"><Loader2 className="spin" size={16} /> Saving review…</div>
-        )}
-
-        {answer && <section className="answer-card"><h3>Result</h3><p>{answer}</p></section>}
 
         {error && (
           <div className="error-banner" role="alert">
@@ -615,15 +613,39 @@ export default function App() {
           </div>
         )}
 
-        <section className="trace-section" aria-labelledby="activity-heading">
-          <h2 className="trace-heading" id="activity-heading"><ActivityLabel /> Activity</h2>
-          <div className="trace-scroll"><TracePanel events={events} /></div>
-        </section>
+        <div className="composer">
+          <label className="visually-hidden" htmlFor="agent-question">Message SegAgent</label>
+          <textarea
+            id="agent-question"
+            rows={2}
+            value={question}
+            onChange={event => setQuestion(event.target.value)}
+            onKeyDown={onQuestionKeyDown}
+            disabled={!caseRecord || !viewerReady || locked}
+            placeholder={
+              !caseRecord
+                ? 'Upload a scan first'
+                : !viewerReady
+                  ? 'Wait for the scan to load'
+                  : awaitingReply
+                    ? 'Answer the question above…'
+                    : 'Ask SegAgent to contour something, or ask about the scan'
+            }
+          />
+          <div className="composer-footer">
+            <span>{awaitingReply ? 'Replying to SegAgent' : 'Enter to send · Shift+Enter for a new line'}</span>
+            <button
+              type="button"
+              className="primary run-button"
+              disabled={!caseRecord || !viewerReady || !question.trim() || locked}
+              onClick={send}
+              aria-label="Send message"
+            >
+              {busy === 'running' ? <Loader2 className="spin" size={17} /> : <SendHorizonal size={17} />}
+            </button>
+          </div>
+        </div>
       </aside>
     </div>
   );
-}
-
-function ActivityLabel() {
-  return <span className="pulse-dot" aria-hidden="true" />;
 }

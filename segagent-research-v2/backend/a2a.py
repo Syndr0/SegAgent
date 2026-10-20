@@ -36,7 +36,7 @@ def agent_card() -> dict:
     settings = get_services().settings
     return {
         "name": "SegAgent Research v2",
-        "description": "Evidence-first 3D medical segmentation and contour-QC research agent.",
+        "description": "Evidence-first 3D medical segmentation research agent.",
         "version": "0.2.0-research",
         "url": f"{settings.api_base_url}/a2a",
         "capabilities": {"streaming": False, "pushNotifications": False},
@@ -49,13 +49,6 @@ def agent_card() -> dict:
                 "description": "Segments named structures in an existing case.",
                 "tags": ["medical-imaging", "segmentation", "NIfTI", "VoxTell"],
                 "examples": ["Segment the liver and both kidneys in case case_..."],
-            },
-            {
-                "id": "contour-qc",
-                "name": "Contour quality control",
-                "description": "Audits registered contours using geometry and expert disagreement.",
-                "tags": ["radiotherapy", "quality-control", "human-review"],
-                "examples": ["Audit the uploaded contours for case case_..."],
             },
         ],
         "metadata": {
@@ -81,7 +74,7 @@ def a2a_rpc(request: JsonRpcRequest) -> dict:
             question = "\n".join(item for item in text_parts if item).strip()
             if not question:
                 return rpc_error(request.id, -32602, "a text message part is required")
-            run_id, stream = services.workflow.start(case_id, question)
+            run_id, stream = services.workflow.send(case_id, question)
             events = [item.model_dump(mode="json") for item in stream]
             run = services.store.get_run(run_id)
             state = "completed" if run.status == "completed" else "input-required"

@@ -5,17 +5,23 @@ body:
   - type: markdown
     attributes:
       value: |
-        Search existing issues first. Do not attach patient images, PHI, credentials,
-        or identifying logs. Report security vulnerabilities privately as described
+        Report current SegAgent Research v3 behavior on main. Its source directory
+        retains the historical name segagent-research-v2. Search existing issues
+        first. Do not attach patient images, PHI, credentials, or identifying logs.
+        Report security vulnerabilities privately as described
         in [SECURITY.md](https://github.com/Syndr0/SegAgent/blob/main/SECURITY.md).
   - type: dropdown
-    id: implementation
+    id: component
     attributes:
-      label: Affected implementation
+      label: Affected component
       options:
-        - Research v2 (segagent-research-v2)
-        - Legacy (segagent)
-        - Repository documentation or shared files
+        - Planning or dialogue
+        - Segmentation or image handling
+        - Evidence or contour QC
+        - Retrieval or protocols
+        - Frontend or viewer
+        - Storage or interoperability
+        - Documentation or repository files
         - Unsure
     validations:
       required: true
@@ -23,7 +29,7 @@ body:
     id: revision
     attributes:
       label: Commit or version
-      description: Include the commit SHA or version you tested.
+      description: Include the commit SHA or version you tested and any local changes.
     validations:
       required: true
   - type: textarea

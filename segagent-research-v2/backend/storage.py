@@ -8,7 +8,16 @@ import uuid
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
-from .schemas import ArtifactRef, CaseRecord, RunEvent, RunRecord, utc_now
+from .schemas import (
+    ArtifactRef,
+    CaseRecord,
+    ChatMessage,
+    ChatRole,
+    ConversationRecord,
+    RunEvent,
+    RunRecord,
+    utc_now,
+)
 
 
 ID_RE = re.compile(r"^[a-z]+_[0-9a-f]{12,32}$")
@@ -43,8 +52,10 @@ class ResearchStore:
         self.root = Path(root)
         self.cases_dir = self.root / "cases"
         self.runs_dir = self.root / "runs"
+        self.conversations_dir = self.root / "conversations"
         self.cases_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.conversations_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
     @staticmethod
@@ -128,6 +139,61 @@ class ResearchStore:
         if ref is None:
             raise FileNotFoundError("artifact not found")
         return ref, self.artifact_path(ref)
+
+    def artifact_inventory(self, case_id: str) -> list[dict]:
+        """Return a deterministic, case-owned mask/contour registry.
+
+        ``active`` means no newer artifact declares itself derived from this
+        artifact. ``latest`` additionally identifies the most recently
+        registered active artifact for the same exact label and role.
+        """
+
+        case = self.get_case(case_id)
+        artifacts = [
+            item for item in case.artifacts if item.kind in {"mask", "contour", "overlay"}
+        ]
+        superseded = {
+            str(item.metadata.get("derived_from"))
+            for item in artifacts
+            if item.metadata.get("derived_from")
+        }
+        latest_by_key: dict[tuple[str, str], str] = {}
+        for item in artifacts:
+            if item.artifact_id in superseded:
+                continue
+            role = str(item.metadata.get("target_type") or item.kind)
+            latest_by_key[(item.label.casefold(), role)] = item.artifact_id
+        return [
+            {
+                "artifact_id": item.artifact_id,
+                "label": item.label,
+                "kind": item.kind,
+                "role": str(item.metadata.get("target_type") or item.kind),
+                "source_model": item.metadata.get("source_model"),
+                "model_version": item.metadata.get("source_version"),
+                "source_prompt": item.metadata.get("source_prompt"),
+                "voxtell_prompt": item.metadata.get("voxtell_prompt"),
+                "prompt_category": item.metadata.get("prompt_category"),
+                "prompt_exploratory": bool(
+                    item.metadata.get("prompt_exploratory", False)
+                ),
+                "artifact_version": item.metadata.get("artifact_version")
+                or item.metadata.get("source_version")
+                or "1",
+                "derived_from": item.metadata.get("derived_from"),
+                "active": item.artifact_id not in superseded,
+                "latest": (
+                    latest_by_key.get(
+                        (
+                            item.label.casefold(),
+                            str(item.metadata.get("target_type") or item.kind),
+                        )
+                    )
+                    == item.artifact_id
+                ),
+            }
+            for item in artifacts
+        ]
 
     def allocate_artifact_path(self, case_id: str, suffix: str) -> tuple[str, Path]:
         artifact_id = _id("artifact")
@@ -233,10 +299,90 @@ class ResearchStore:
                 path.unlink(missing_ok=True)
             raise
 
-    def create_run(self, case_id: str, question: str) -> RunRecord:
+    def conversation_path(self, conversation_id: str) -> Path:
+        self._validate_id(conversation_id, "conversation")
+        return self.conversations_dir / f"{conversation_id}.json"
+
+    def save_conversation(self, conversation: ConversationRecord) -> None:
+        conversation.updated_at = utc_now()
+        path = self.conversation_path(conversation.conversation_id)
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(conversation.model_dump_json(indent=2), encoding="utf-8")
+        temp.replace(path)
+
+    def get_conversation(self, conversation_id: str) -> ConversationRecord:
+        path = self.conversation_path(conversation_id)
+        if not path.exists():
+            raise FileNotFoundError("conversation not found")
+        return ConversationRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def conversation_for_case(self, case_id: str) -> ConversationRecord:
+        """Return the case's conversation, creating it on first use.
+
+        One conversation per case: the id doubles as the LangGraph thread id, so
+        every turn for a patient shares accumulated context.
+        """
+        self.get_case(case_id)
+        pointer = self.case_dir(case_id) / "conversation.txt"
+        with self._lock:
+            if pointer.exists():
+                conversation_id = pointer.read_text(encoding="utf-8").strip()
+                if conversation_id:
+                    try:
+                        return self.get_conversation(conversation_id)
+                    except (FileNotFoundError, ValueError):
+                        pass
+            conversation = ConversationRecord(
+                conversation_id=_id("conversation"), case_id=case_id
+            )
+            self.save_conversation(conversation)
+            pointer.write_text(conversation.conversation_id, encoding="utf-8")
+            return conversation
+
+    def append_message(
+        self,
+        conversation_id: str,
+        case_id: str,
+        role: ChatRole | str,
+        text: str,
+        run_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> ChatMessage:
+        message = ChatMessage(
+            message_id=_id("message"),
+            conversation_id=conversation_id,
+            case_id=case_id,
+            role=ChatRole(role),
+            text=text,
+            run_id=run_id,
+            metadata=metadata or {},
+        )
+        path = self.conversations_dir / f"{conversation_id}.messages.jsonl"
+        with self._lock, path.open("a", encoding="utf-8") as handle:
+            handle.write(message.model_dump_json() + "\n")
+        return message
+
+    def messages(self, conversation_id: str) -> list[ChatMessage]:
+        self._validate_id(conversation_id, "conversation")
+        path = self.conversations_dir / f"{conversation_id}.messages.jsonl"
+        if not path.exists():
+            return []
+        return [
+            ChatMessage.model_validate_json(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def create_run(
+        self, case_id: str, question: str, conversation_id: str | None = None
+    ) -> RunRecord:
         self.get_case(case_id)
         run = RunRecord(
-            run_id=_id("run"), case_id=case_id, question=question, status="created"
+            run_id=_id("run"),
+            case_id=case_id,
+            question=question,
+            status="created",
+            conversation_id=conversation_id,
         )
         self.save_run(run)
         return run
